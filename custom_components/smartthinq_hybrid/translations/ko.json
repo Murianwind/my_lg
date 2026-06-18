@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ThinQ Web 로그인",
+        "description": "LG ThinQ 계정(ID/비밀번호)으로 로그인합니다. 에어컨 풍속/회전(스윙) 제어와 세탁기 코스 센서에만 사용됩니다.",
+        "data": {
+          "username": "아이디",
+          "password": "비밀번호"
+        }
+      },
+      "pat": {
+        "title": "공식 ThinQ Connect (PAT)",
+        "description": "connect-pat.lgthinq.com 에서 발급한 개인용 액세스 토큰(PAT)을 입력하세요. 전원/모드/온도/습도 제어에 사용됩니다.",
+        "data": {
+          "pat_access_token": "액세스 토큰",
+          "pat_country": "국가"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "ThinQ Web 로그인에 실패했습니다. 아이디와 비밀번호를 확인하세요.",
+      "pat_invalid": "PAT 인증에 실패했습니다. 액세스 토큰을 확인하세요.",
+      "unknown": "예기치 않은 오류가 발생했습니다."
+    },
+    "abort": {
+      "already_configured": "이미 등록된 계정입니다."
+    }
+  }
+}

@@ -26,5 +26,25 @@
     "abort": {
       "already_configured": "이미 등록된 계정입니다."
     }
+  },
+  "entity": {
+    "sensor": {
+      "washer_run_state": {
+        "state": {
+          "running": "동작 중",
+          "initial": "대기 중",
+          "rinsing": "헹굼",
+          "spinning": "탈수",
+          "firmware": "펌웨어 업데이트 중",
+          "reserved": "예약 설정됨",
+          "pause": "일시정지",
+          "power_off": "꺼짐",
+          "detecting": "감지 중",
+          "end": "완료",
+          "soaking": "불림",
+          "error": "오류"
+        }
+      }
+    }
   }
 }

@@ -114,12 +114,7 @@ async def _async_build_washer_course_sensor(
     pat_coordinator: PatDeviceCoordinator,
     pat_device_id: str,
 ) -> "WasherCourseSensor | None":
-    """Build the wideq-backed current-course sensor for a washer, if matched.
-
-    Returns None if no matching wideq washer device could be found or
-    initialized, in which case the washer simply has no course sensor
-    (the rest of the washer sensors, all PAT-based, are unaffected).
-    """
+    """Build the wideq-backed current-course sensor for a washer, if matched."""
     if runtime_data.wideq_client.devices is None:
         return None
 
@@ -188,12 +183,7 @@ async def _async_build_washer_course_sensor(
 
 
 class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Air conditioner filter remaining life sensor.
-
-    Reads from wideq (AcFilterCoordinator) when available — the official
-    PAT API does not expose filterInfo for most models. Falls back to
-    PAT's FILTER_REMAIN_PERCENT if no wideq device is matched.
-    """
+    """Air conditioner filter remaining life sensor."""
 
     _attr_has_entity_name = True
     _attr_name = "Filter remaining"
@@ -214,7 +204,6 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
         self._attr_suggested_object_id = "ac_filter_remaining"
 
         if filter_coordinator is not None:
-            # wideq 코디네이터 업데이트도 이 엔티티의 상태 갱신을 트리거하도록 등록
             self.async_on_remove(
                 filter_coordinator.async_add_listener(self.async_write_ha_state)
             )
@@ -235,7 +224,6 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
                 "use_time": data.get("use_time"),
                 "max_time": data.get("max_time"),
             }
-        # PAT fallback
         attrs = {}
         used_time = self.coordinator.get_status(Property.USED_TIME)
         max_time = self.coordinator.get_status(Property.FILTER_LIFETIME)
@@ -247,6 +235,7 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
 
 
 _RUN_STATE_OPTIONS = [
+    # PAT API 공식 값 (12개)
     "running",
     "initial",
     "rinsing",
@@ -259,18 +248,23 @@ _RUN_STATE_OPTIONS = [
     "end",
     "soaking",
     "error",
+    # wideq(비공식 API)에서만 나오는 추가 값들
+    # PAT가 실제로 이 값을 줄 가능성은 낮지만, 받더라도 unknown으로 처리되지 않도록 포함
+    "drying",
+    "add_drain",
+    "prewash",
+    "rinse_hold",
+    "dispensing",
+    "refreshing",
+    "detergent_amount",
+    "frozen_prevent_initial",
+    "frozen_prevent_running",
+    "frozen_prevent_pause",
 ]
 
 
 class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Washer run state sensor (PAT).
-
-    The PAT API's `runState.currentState` enum values are returned in
-    upper snake case (e.g. "POWER_OFF"); they are lowercased here so they
-    match the `state` keys under this entity's `translation_key` in
-    strings.json / translations/ko.json, which is how Home Assistant's
-    standard entity-state translation mechanism looks them up.
-    """
+    """Washer run state sensor (PAT)."""
 
     _attr_has_entity_name = True
     _attr_name = "Run state"
@@ -296,10 +290,15 @@ class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
 
 
 class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Washer remaining time sensor (PAT), formatted as HH:MM."""
+    """Washer remaining time sensor (PAT).
+
+    Converts remain_hour / remain_minute into an absolute completion
+    timestamp (now + remaining time), displayed as "finishes at HH:MM".
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Remaining time"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:timer-sand"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
@@ -311,12 +310,16 @@ class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEnti
 
     @property
     def native_value(self):
-        """Return the washer's remaining time as HH:MM."""
+        """Return the estimated completion time as an absolute timestamp."""
+        from datetime import datetime, timedelta, timezone
         hour = self.coordinator.get_status(Property.REMAIN_HOUR)
         minute = self.coordinator.get_status(Property.REMAIN_MINUTE)
         if hour is None or minute is None:
             return None
-        return f"{int(hour):02d}:{int(minute):02d}"
+        total_minutes = int(hour) * 60 + int(minute)
+        if total_minutes == 0:
+            return None
+        return datetime.now(timezone.utc) + timedelta(minutes=total_minutes)
 
 
 class WasherCycleCountSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
@@ -324,7 +327,6 @@ class WasherCycleCountSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEnti
 
     _attr_has_entity_name = True
     _attr_name = "Cycle count"
-    _attr_state_class = "total_increasing"
     _attr_icon = "mdi:washing-machine-alert"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
@@ -360,5 +362,5 @@ class WasherCourseSensor(CoordinatorEntity[WasherCourseCoordinator], SensorEntit
 
     @property
     def native_value(self):
-        """Return the washer's current course."""
-        return self.coordinator.data
+        """Return the washer's current course, or '-' when not available."""
+        return self.coordinator.data or "-"

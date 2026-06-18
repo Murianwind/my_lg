@@ -35,7 +35,7 @@ async def async_setup_entry(
 
     for device_id, coordinator in runtime_data.pat_coordinators.items():
         if coordinator.device.device_type == PAT_DEVICE_TYPE_AC:
-            if coordinator.device.get_status(Property.FILTER_REMAIN_PERCENT) is not None:
+            if coordinator.get_status(Property.FILTER_REMAIN_PERCENT) is not None:
                 entities.append(AcFilterRemainSensor(coordinator))
         elif coordinator.device.device_type == PAT_DEVICE_TYPE_WASHER:
             entities.append(WasherRunStateSensor(coordinator))
@@ -119,7 +119,7 @@ async def _async_build_washer_course_sensor(
     runtime_data.washer_wideq_devices[pat_device_id] = wideq_device
 
     def _get_pat_run_state() -> str | None:
-        return pat_coordinator.device.get_status(Property.CURRENT_STATE)
+        return pat_coordinator.get_status(Property.CURRENT_STATE)
 
     entry = pat_coordinator.config_entry
     course_coordinator = WasherCourseCoordinator(
@@ -127,60 +127,66 @@ async def _async_build_washer_course_sensor(
     )
     if entry is not None:
         entry.async_on_unload(course_coordinator.unsub_pat_listener)
-    return WasherCourseSensor(course_coordinator, pat_coordinator.device.device_id)
+    return WasherCourseSensor(course_coordinator, pat_coordinator)
 
 
 class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
     """Air conditioner filter remaining life sensor (PAT)."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "filter_remain_percent"
+    _attr_name = "Filter remaining"
     _attr_native_unit_of_measurement = "%"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.device.device_id}-filter_remain_percent"
+        self._attr_device_info = coordinator.device_info
+        self._attr_suggested_object_id = "ac_filter_remaining"
 
     @property
     def native_value(self):
         """Return the remaining filter life percentage."""
-        return self.coordinator.device.get_status(Property.FILTER_REMAIN_PERCENT)
+        return self.coordinator.get_status(Property.FILTER_REMAIN_PERCENT)
 
 
 class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
     """Washer run state sensor (PAT)."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "run_state"
+    _attr_name = "Run state"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.device.device_id}-run_state"
+        self._attr_device_info = coordinator.device_info
+        self._attr_suggested_object_id = "washer_run_state"
 
     @property
     def native_value(self):
         """Return the washer's current run state."""
-        return self.coordinator.device.get_status(Property.CURRENT_STATE)
+        return self.coordinator.get_status(Property.CURRENT_STATE)
 
 
 class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
     """Washer remaining time sensor (PAT), formatted as HH:MM."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "remain_time"
+    _attr_name = "Remaining time"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.device.device_id}-remain_time"
+        self._attr_device_info = coordinator.device_info
+        self._attr_suggested_object_id = "washer_remain_time"
 
     @property
     def native_value(self):
         """Return the washer's remaining time as HH:MM."""
-        hour = self.coordinator.device.get_status(Property.REMAIN_HOUR)
-        minute = self.coordinator.device.get_status(Property.REMAIN_MINUTE)
+        hour = self.coordinator.get_status(Property.REMAIN_HOUR)
+        minute = self.coordinator.get_status(Property.REMAIN_MINUTE)
         if hour is None or minute is None:
             return None
         return f"{int(hour):02d}:{int(minute):02d}"
@@ -190,31 +196,39 @@ class WasherCycleCountSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEnti
     """Washer cycle count sensor (PAT)."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "cycle_count"
+    _attr_name = "Cycle count"
     _attr_state_class = "total_increasing"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.device.device_id}-cycle_count"
+        self._attr_device_info = coordinator.device_info
+        self._attr_suggested_object_id = "washer_cycle_count"
 
     @property
     def native_value(self):
         """Return the washer's lifetime cycle count."""
-        return self.coordinator.device.get_status(Property.CYCLE_COUNT)
+        return self.coordinator.get_status(Property.CYCLE_COUNT)
 
 
 class WasherCourseSensor(CoordinatorEntity[WasherCourseCoordinator], SensorEntity):
     """Washer current course sensor (wideq, trigger-polled while running)."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "current_course"
+    _attr_name = "Current course"
     _attr_icon = "mdi:pin-outline"
 
-    def __init__(self, coordinator: WasherCourseCoordinator, pat_device_id: str) -> None:
+    def __init__(
+        self,
+        coordinator: WasherCourseCoordinator,
+        pat_coordinator: PatDeviceCoordinator,
+    ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{pat_device_id}-current_course"
+        self._attr_unique_id = f"{pat_coordinator.device.device_id}-current_course"
+        self._attr_device_info = pat_coordinator.device_info
+        self._attr_suggested_object_id = "washer_current_course"
 
     @property
     def native_value(self):

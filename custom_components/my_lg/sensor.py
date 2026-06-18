@@ -4,6 +4,7 @@ and the washer's current-course sensor (wideq, trigger-polled).
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 
 from thinqconnect.devices.const import Property
@@ -11,7 +12,11 @@ from thinqconnect.devices.const import Property
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_AC, PAT_DEVICE_TYPE_WASHER
@@ -19,9 +24,13 @@ from .coordinator_course import WasherCourseCoordinator
 from .coordinator_pat import PatDeviceCoordinator
 from .device_router import match_wideq_to_pat
 from .wideq import DeviceType as WideqDeviceType
+from .wideq.devices.ac import AirConditionerFanSwingDevice
 from .wideq.devices.washerDryer import WMDevice
 
 _LOGGER = logging.getLogger(__name__)
+
+# wideq 필터 정보 폴링 간격 (분 단위 변화이므로 자주 할 필요 없음)
+_FILTER_UPDATE_INTERVAL = timedelta(minutes=30)
 
 
 async def async_setup_entry(
@@ -35,8 +44,24 @@ async def async_setup_entry(
 
     for device_id, coordinator in runtime_data.pat_coordinators.items():
         if coordinator.device.device_type == PAT_DEVICE_TYPE_AC:
-            if coordinator.get_status(Property.FILTER_REMAIN_PERCENT) is not None:
-                entities.append(AcFilterRemainSensor(coordinator))
+            # 필터 센서: wideq device가 있으면 wideq로 폴링, 없으면 PAT fallback
+            wideq_ac = runtime_data.ac_fan_swing_devices.get(device_id)
+            if wideq_ac is not None:
+                filter_coordinator = AcFilterCoordinator(hass, entry, wideq_ac)
+                try:
+                    await filter_coordinator.async_config_entry_first_refresh()
+                except Exception:  # pylint: disable=broad-except
+                    # 필터 조회 실패는 치명적이지 않음 - 센서는 생성하되 데이터 없이 시작
+                    _LOGGER.warning(
+                        "Initial filter info fetch failed for AC '%s'; "
+                        "will retry on schedule",
+                        coordinator.device.alias,
+                    )
+                entities.append(AcFilterRemainSensor(coordinator, filter_coordinator))
+            elif coordinator.get_status(Property.FILTER_REMAIN_PERCENT) is not None:
+                # PAT가 실제로 값을 주는 모델인 경우 fallback
+                entities.append(AcFilterRemainSensor(coordinator, None))
+
         elif coordinator.device.device_type == PAT_DEVICE_TYPE_WASHER:
             entities.append(WasherRunStateSensor(coordinator))
             entities.append(WasherRemainTimeSensor(coordinator))
@@ -51,13 +76,50 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
+class AcFilterCoordinator(DataUpdateCoordinator[dict | None]):
+    """Polls wideq for AC filter life (use_time / max_time / remain_percent).
+
+    The official PAT API does not expose filterInfo for most models.
+    This coordinator calls the wideq V1 'Filter' config endpoint instead,
+    matching the approach used by ha-smartthinq-sensors (HACS).
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config_entry,
+        wideq_device: AirConditionerFanSwingDevice,
+    ) -> None:
+        """Initialize the coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            config_entry=config_entry,
+            name=f"my_lg_ac_filter_{wideq_device.device_info.name}",
+            update_interval=_FILTER_UPDATE_INTERVAL,
+        )
+        self._wideq_device = wideq_device
+
+    async def _async_update_data(self) -> dict | None:
+        """Fetch filter info from wideq."""
+        try:
+            return await self._wideq_device.async_get_filter_info()
+        except Exception as exc:  # pylint: disable=broad-except
+            raise UpdateFailed(f"wideq 필터 정보 조회 실패: {exc}") from exc
+
+
 async def _async_build_washer_course_sensor(
     hass: HomeAssistant,
     runtime_data,
     pat_coordinator: PatDeviceCoordinator,
     pat_device_id: str,
 ) -> "WasherCourseSensor | None":
-    """Build the wideq-backed current-course sensor for a washer, if matched."""
+    """Build the wideq-backed current-course sensor for a washer, if matched.
+
+    Returns None if no matching wideq washer device could be found or
+    initialized, in which case the washer simply has no course sensor
+    (the rest of the washer sensors, all PAT-based, are unaffected).
+    """
     if runtime_data.wideq_client.devices is None:
         return None
 
@@ -126,12 +188,11 @@ async def _async_build_washer_course_sensor(
 
 
 class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Air conditioner filter remaining life sensor (PAT).
+    """Air conditioner filter remaining life sensor.
 
-    Exposes `used_time` / `max_time` as extra state attributes (sourced
-    from `filterInfo.usedTime` and `filterInfo.filterLifetime`), matching
-    the attribute layout other SmartThinQ-LGE-Sensors-style integrations
-    use for this same sensor.
+    Reads from wideq (AcFilterCoordinator) when available — the official
+    PAT API does not expose filterInfo for most models. Falls back to
+    PAT's FILTER_REMAIN_PERCENT if no wideq device is matched.
     """
 
     _attr_has_entity_name = True
@@ -140,21 +201,41 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
     _attr_state_class = "measurement"
     _attr_icon = "mdi:air-filter"
 
-    def __init__(self, coordinator: PatDeviceCoordinator) -> None:
+    def __init__(
+        self,
+        coordinator: PatDeviceCoordinator,
+        filter_coordinator: AcFilterCoordinator | None,
+    ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
+        self._filter_coordinator = filter_coordinator
         self._attr_unique_id = f"{coordinator.device.device_id}-filter_remain_percent"
         self._attr_device_info = coordinator.device_info
         self._attr_suggested_object_id = "ac_filter_remaining"
 
+        if filter_coordinator is not None:
+            # wideq 코디네이터 업데이트도 이 엔티티의 상태 갱신을 트리거하도록 등록
+            self.async_on_remove(
+                filter_coordinator.async_add_listener(self.async_write_ha_state)
+            )
+
     @property
     def native_value(self):
         """Return the remaining filter life percentage."""
+        if self._filter_coordinator is not None and self._filter_coordinator.data:
+            return self._filter_coordinator.data.get("remain_percent")
         return self.coordinator.get_status(Property.FILTER_REMAIN_PERCENT)
 
     @property
     def extra_state_attributes(self):
-        """Return used_time / max_time, if the device reports them."""
+        """Return use_time / max_time attributes."""
+        if self._filter_coordinator is not None and self._filter_coordinator.data:
+            data = self._filter_coordinator.data
+            return {
+                "use_time": data.get("use_time"),
+                "max_time": data.get("max_time"),
+            }
+        # PAT fallback
         attrs = {}
         used_time = self.coordinator.get_status(Property.USED_TIME)
         max_time = self.coordinator.get_status(Property.FILTER_LIFETIME)

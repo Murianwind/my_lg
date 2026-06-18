@@ -15,6 +15,7 @@ from thinqconnect import ThinQAPIException
 from thinqconnect.devices.const import Property
 
 from homeassistant.components.humidifier import (
+    HumidifierAction,
     HumidifierDeviceClass,
     HumidifierEntity,
     HumidifierEntityFeature,
@@ -96,6 +97,22 @@ class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator]
     def target_humidity(self) -> int | None:
         """Return the target humidity."""
         return self.coordinator.get_status(Property.TARGET_HUMIDITY)
+
+    @property
+    def action(self) -> HumidifierAction | None:
+        """Return the current action.
+
+        DRYING when the dehumidifier is running; HA automatically
+        overrides this to OFF when is_on is False.
+        """
+        if self.is_on:
+            return HumidifierAction.DRYING
+        return HumidifierAction.OFF
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return target_humidity_step (step=5 per the real device profile)."""
+        return {"target_humidity_step": 5}
 
     @property
     def min_humidity(self) -> int:

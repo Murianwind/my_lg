@@ -248,8 +248,6 @@ _RUN_STATE_OPTIONS = [
     "end",
     "soaking",
     "error",
-    # wideq(비공식 API)에서만 나오는 추가 값들
-    # PAT가 실제로 이 값을 줄 가능성은 낮지만, 받더라도 unknown으로 처리되지 않도록 포함
     "drying",
     "add_drain",
     "prewash",

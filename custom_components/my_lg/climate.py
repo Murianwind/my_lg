@@ -72,6 +72,7 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
     _attr_name = None
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.FAN_ONLY]
     _attr_temperature_unit = "°C"
+    _attr_target_temperature_step = 0.5
 
     def __init__(
         self,
@@ -82,6 +83,8 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
         super().__init__(coordinator)
         self._fan_swing_device = fan_swing_device
         self._attr_unique_id = f"{coordinator.device.device_id}-climate"
+        self._attr_device_info = coordinator.device_info
+        self._attr_suggested_object_id = "aircon"
 
         supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
         supported_features |= ClimateEntityFeature.TURN_ON
@@ -117,31 +120,31 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
     @property
     def hvac_mode(self) -> HVACMode | None:
         """Return the current hvac mode."""
-        operation_mode = self.device.get_status(Property.AIR_CON_OPERATION_MODE)
+        operation_mode = self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE)
         if operation_mode == "POWER_OFF":
             return HVACMode.OFF
-        job_mode = self.device.get_status(Property.CURRENT_JOB_MODE)
+        job_mode = self.coordinator.get_status(Property.CURRENT_JOB_MODE)
         return _PAT_JOB_MODE_TO_HVAC.get(job_mode)
 
     @property
     def current_temperature(self) -> float | None:
         """Return the current temperature."""
-        return self.device.get_status(Property.CURRENT_TEMPERATURE_C)
+        return self.coordinator.get_status(Property.CURRENT_TEMPERATURE_C)
 
     @property
     def target_temperature(self) -> float | None:
         """Return the target temperature."""
-        return self.device.get_status(Property.TARGET_TEMPERATURE_C)
+        return self.coordinator.get_status(Property.TARGET_TEMPERATURE_C)
 
     @property
     def min_temp(self) -> float:
         """Return the minimum supported temperature."""
-        return self.device.get_status(Property.MIN_TARGET_TEMPERATURE_C) or 18.0
+        return self.coordinator.get_status(Property.MIN_TARGET_TEMPERATURE_C) or 18.0
 
     @property
     def max_temp(self) -> float:
         """Return the maximum supported temperature."""
-        return self.device.get_status(Property.MAX_TARGET_TEMPERATURE_C) or 30.0
+        return self.coordinator.get_status(Property.MAX_TARGET_TEMPERATURE_C) or 30.0
 
     @property
     def fan_mode(self) -> str | None:
@@ -162,7 +165,7 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
                 pat_mode = _HVAC_TO_PAT_JOB_MODE.get(hvac_mode)
                 if pat_mode is None:
                     raise ServiceValidationError(f"Unsupported hvac mode: {hvac_mode}")
-                if self.device.get_status(Property.AIR_CON_OPERATION_MODE) == "POWER_OFF":
+                if self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE) == "POWER_OFF":
                     await self.device.set_air_con_operation_mode("POWER_ON")
                 await self.device.set_current_job_mode(pat_mode)
         except ThinQAPIException as exc:

@@ -8,7 +8,7 @@ import logging
 
 from thinqconnect.devices.const import Property
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -150,11 +150,37 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
         return self.coordinator.get_status(Property.FILTER_REMAIN_PERCENT)
 
 
+_RUN_STATE_OPTIONS = [
+    "running",
+    "initial",
+    "rinsing",
+    "spinning",
+    "firmware",
+    "reserved",
+    "pause",
+    "power_off",
+    "detecting",
+    "end",
+    "soaking",
+    "error",
+]
+
+
 class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Washer run state sensor (PAT)."""
+    """Washer run state sensor (PAT).
+
+    The PAT API's `runState.currentState` enum values are returned in
+    upper snake case (e.g. "POWER_OFF"); they are lowercased here so they
+    match the `state` keys under this entity's `translation_key` in
+    strings.json / translations/ko.json, which is how Home Assistant's
+    standard entity-state translation mechanism looks them up.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Run state"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = _RUN_STATE_OPTIONS
+    _attr_translation_key = "washer_run_state"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
@@ -166,7 +192,10 @@ class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
     @property
     def native_value(self):
         """Return the washer's current run state."""
-        return self.coordinator.get_status(Property.CURRENT_STATE)
+        state = self.coordinator.get_status(Property.CURRENT_STATE)
+        if state is None:
+            return None
+        return state.lower()
 
 
 class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):

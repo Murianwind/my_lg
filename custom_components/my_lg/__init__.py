@@ -58,7 +58,7 @@ from .wideq.devices.ac import AirConditionerFanSwingDevice
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CLIMATE, Platform.HUMIDIFIER, Platform.SENSOR]
+PLATFORMS = [Platform.CLIMATE, Platform.HUMIDIFIER, Platform.SENSOR, Platform.SWITCH]
 
 
 class SmartThinqHybridRuntimeData:

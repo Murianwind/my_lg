@@ -51,6 +51,7 @@ class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator]
 
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_translation_key = "dehumidifier"
     _attr_device_class = HumidifierDeviceClass.DEHUMIDIFIER
     _attr_supported_features = HumidifierEntityFeature.MODES
 

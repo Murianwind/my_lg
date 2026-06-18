@@ -47,9 +47,18 @@ async def async_setup_entry(
             # 필터 센서: wideq device가 있으면 wideq로 폴링, 없으면 PAT fallback
             wideq_ac = runtime_data.ac_fan_swing_devices.get(device_id)
             if wideq_ac is not None:
+                _LOGGER.debug(
+                    "AC '%s': matched wideq device for filter polling",
+                    coordinator.device.alias,
+                )
                 filter_coordinator = AcFilterCoordinator(hass, entry, wideq_ac)
                 try:
                     await filter_coordinator.async_config_entry_first_refresh()
+                    _LOGGER.debug(
+                        "AC '%s': initial filter fetch result: %r",
+                        coordinator.device.alias,
+                        filter_coordinator.data,
+                    )
                 except Exception:  # pylint: disable=broad-except
                     # 필터 조회 실패는 치명적이지 않음 - 센서는 생성하되 데이터 없이 시작
                     _LOGGER.warning(
@@ -60,7 +69,17 @@ async def async_setup_entry(
                 entities.append(AcFilterRemainSensor(coordinator, filter_coordinator))
             elif coordinator.get_status(Property.FILTER_REMAIN_PERCENT) is not None:
                 # PAT가 실제로 값을 주는 모델인 경우 fallback
+                _LOGGER.debug(
+                    "AC '%s': no wideq device matched; using PAT FILTER_REMAIN_PERCENT fallback",
+                    coordinator.device.alias,
+                )
                 entities.append(AcFilterRemainSensor(coordinator, None))
+            else:
+                _LOGGER.debug(
+                    "AC '%s': no wideq device matched and PAT has no filter data; "
+                    "filter sensor will not be created",
+                    coordinator.device.alias,
+                )
 
         elif coordinator.device.device_type == PAT_DEVICE_TYPE_WASHER:
             entities.append(WasherRunStateSensor(coordinator))
@@ -183,7 +202,12 @@ async def _async_build_washer_course_sensor(
 
 
 class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Air conditioner filter remaining life sensor."""
+    """Air conditioner filter remaining life sensor.
+
+    Reads from wideq (AcFilterCoordinator) when available — the official
+    PAT API does not expose filterInfo for most models. Falls back to
+    PAT's FILTER_REMAIN_PERCENT if no wideq device is matched.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Filter remaining"
@@ -204,6 +228,7 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
         self._attr_suggested_object_id = "ac_filter_remaining"
 
         if filter_coordinator is not None:
+            # wideq 코디네이터 업데이트도 이 엔티티의 상태 갱신을 트리거하도록 등록
             self.async_on_remove(
                 filter_coordinator.async_add_listener(self.async_write_ha_state)
             )
@@ -224,6 +249,7 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
                 "use_time": data.get("use_time"),
                 "max_time": data.get("max_time"),
             }
+        # PAT fallback
         attrs = {}
         used_time = self.coordinator.get_status(Property.USED_TIME)
         max_time = self.coordinator.get_status(Property.FILTER_LIFETIME)
@@ -235,34 +261,40 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
 
 
 _RUN_STATE_OPTIONS = [
-    # PAT API 공식 값 (12개)
-    "running",
-    "initial",
-    "rinsing",
-    "spinning",
-    "firmware",
-    "reserved",
-    "pause",
     "power_off",
-    "detecting",
-    "end",
-    "soaking",
-    "error",
     "drying",
-    "add_drain",
-    "prewash",
-    "rinse_hold",
-    "dispensing",
+    "frozen_prevent_pause",
     "refreshing",
+    "end",
+    "add_drain",
+    "detecting",
+    "error",
+    "soaking",
+    "spinning",
+    "initial",
+    "frozen_prevent_running",
     "detergent_amount",
     "frozen_prevent_initial",
-    "frozen_prevent_running",
-    "frozen_prevent_pause",
+    "reserved",
+    "rinsing",
+    "prewash",
+    "rinse_hold",
+    "pause",
+    "running",
+    "dispensing",
+    "firmware",
 ]
 
 
 class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Washer run state sensor (PAT)."""
+    """Washer run state sensor (PAT).
+
+    The PAT API's `runState.currentState` enum values are returned in
+    upper snake case (e.g. "POWER_OFF"); they are lowercased here so they
+    match the `state` keys under this entity's `translation_key` in
+    strings.json / translations/ko.json, which is how Home Assistant's
+    standard entity-state translation mechanism looks them up.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Run state"
@@ -290,8 +322,10 @@ class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
 class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
     """Washer remaining time sensor (PAT).
 
-    Converts remain_hour / remain_minute into an absolute completion
-    timestamp (now + remaining time), displayed as "finishes at HH:MM".
+    Converts the PAT API's remain_hour / remain_minute values into an
+    absolute completion timestamp (now + remaining time), so Home Assistant
+    can display it as "finishes at HH:MM" rather than a raw duration.
+    device_class=TIMESTAMP expects an ISO 8601 datetime string.
     """
 
     _attr_has_entity_name = True

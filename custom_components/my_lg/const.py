@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-DOMAIN = "smartthinq_hybrid"
+DOMAIN = "my_lg"
 
 # --- Config entry data keys ---
 CONF_WIDEQ_REFRESH_TOKEN = "wideq_refresh_token"

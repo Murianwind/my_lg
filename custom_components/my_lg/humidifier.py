@@ -58,6 +58,8 @@ class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator]
         """Initialize the dehumidifier entity."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.device.device_id}-dehumidifier"
+        self._attr_device_info = coordinator.device_info
+        self._attr_suggested_object_id = "dehumidifier"
         self._attr_available_modes = [
             "RAPID_HUMIDITY",
             "SMART_HUMIDITY",
@@ -74,7 +76,7 @@ class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator]
     @property
     def is_on(self) -> bool | None:
         """Return whether the dehumidifier is on."""
-        operation_mode = self.device.get_status(Property.DEHUMIDIFIER_OPERATION_MODE)
+        operation_mode = self.coordinator.get_status(Property.DEHUMIDIFIER_OPERATION_MODE)
         if operation_mode is None:
             return None
         return operation_mode == "POWER_ON"
@@ -82,17 +84,17 @@ class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator]
     @property
     def mode(self) -> str | None:
         """Return the current job mode."""
-        return self.device.get_status(Property.CURRENT_JOB_MODE)
+        return self.coordinator.get_status(Property.CURRENT_JOB_MODE)
 
     @property
     def current_humidity(self) -> int | None:
         """Return the current humidity."""
-        return self.device.get_status(Property.CURRENT_HUMIDITY)
+        return self.coordinator.get_status(Property.CURRENT_HUMIDITY)
 
     @property
     def target_humidity(self) -> int | None:
         """Return the target humidity."""
-        return self.device.get_status(Property.TARGET_HUMIDITY)
+        return self.coordinator.get_status(Property.TARGET_HUMIDITY)
 
     @property
     def min_humidity(self) -> int:

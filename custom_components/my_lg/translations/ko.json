@@ -28,6 +28,51 @@
     }
   },
   "entity": {
+    "climate": {
+      "aircon": {
+        "state_attributes": {
+          "fan_mode": {
+            "state": {
+              "SLOW": "약하게",
+              "SLOW_LOW": "약-저",
+              "LOW": "저",
+              "LOW_MID": "저-중",
+              "MID": "중",
+              "MID_HIGH": "중-고",
+              "HIGH": "고",
+              "POWER": "강력",
+              "AUTO": "자동",
+              "DIFFUSE": "디퓨즈",
+              "R_LOW": "우측 저",
+              "R_MID": "우측 중",
+              "R_HIGH": "우측 고",
+              "L_LOW": "좌측 저",
+              "L_MID": "좌측 중",
+              "L_HIGH": "좌측 고"
+            }
+          },
+          "swing_mode": {
+            "state": {
+              "Off": "끔",
+              "Top": "맨 위",
+              "MiddleTop1": "위쪽 1",
+              "MiddleTop2": "위쪽 2",
+              "MiddleBottom2": "아래쪽 2",
+              "MiddleBottom1": "아래쪽 1",
+              "Bottom": "맨 아래",
+              "Swing": "스윙",
+              "Left": "좌측",
+              "MiddleLeft": "좌측 중간",
+              "Center": "중앙",
+              "MiddleRight": "우측 중간",
+              "Right": "우측",
+              "LeftHalf": "좌측 절반",
+              "RightHalf": "우측 절반"
+            }
+          }
+        }
+      }
+    },
     "sensor": {
       "washer_run_state": {
         "state": {
@@ -43,6 +88,21 @@
           "end": "완료",
           "soaking": "불림",
           "error": "오류"
+        }
+      }
+    },
+    "humidifier": {
+      "dehumidifier": {
+        "state_attributes": {
+          "mode": {
+            "state": {
+              "RAPID_HUMIDITY": "강력 제습",
+              "SMART_HUMIDITY": "스마트 제습",
+              "INTENSIVE_DRY": "집중 건조",
+              "QUIET_HUMIDITY": "조용한 제습",
+              "CLOTHES_DRY": "의류 건조"
+            }
+          }
         }
       }
     }

@@ -130,13 +130,17 @@ class AirConditionerFanSwingDevice(Device):
     will poll ``async_get_filter_info()`` on its own schedule.
     """
 
-    # Config/control key names, identical on both V1 and V2 per HACS
-    # ha-smartthinq-sensors: the response itself is a flat dict directly
-    # containing "UseTime" / "ChangePeriod", not nested under "Filter".
+    # Config/control key names. The response field names differ between
+    # API generations (confirmed against real device logs):
+    #   V1 ("Filter" config key):        flat "UseTime" / "ChangePeriod"
+    #   V2 ("filterMngStateCtrl" key):    "airState.filterMngStates.useTime" /
+    #                                     "airState.filterMngStates.maxTime"
     _FILTER_CONFIG_KEY_V1 = "Filter"
     _FILTER_CONFIG_KEY_V2 = "filterMngStateCtrl"
-    _FILTER_USE_TIME_FIELD = "UseTime"
-    _FILTER_MAX_TIME_FIELD = "ChangePeriod"
+    _FILTER_USE_TIME_FIELD_V1 = "UseTime"
+    _FILTER_MAX_TIME_FIELD_V1 = "ChangePeriod"
+    _FILTER_USE_TIME_FIELD_V2 = "airState.filterMngStates.useTime"
+    _FILTER_MAX_TIME_FIELD_V2 = "airState.filterMngStates.maxTime"
 
     def __init__(self, client: ClientAsync, device_info: DeviceInfo) -> None:
         """Initialize the device."""
@@ -169,13 +173,15 @@ class AirConditionerFanSwingDevice(Device):
         """Return a list of available vertical step (vane position) modes."""
         return self._get_property_values(STATE_WDIR_VSTEP, ACVStepMode)
 
-    async def _async_get_raw_filter_status(self) -> dict | None:
+    async def _async_get_raw_filter_status(self) -> tuple[dict | None, bool]:
         """Fetch the raw filter status dict, trying V1 then V2.
 
         `_get_config` (V1) and `_get_config_v2` (V2) are mutually exclusive
         based on `_should_poll`, so exactly one of them can ever succeed
         for a given device - calling both is safe and simply lets this
         class work regardless of which API generation the device uses.
+        Returns (data, is_v2): is_v2 indicates which field names to use to
+        parse `data`, since V1 and V2 use different field names.
         """
         try:
             data = await self._get_config(self._FILTER_CONFIG_KEY_V1)
@@ -184,7 +190,7 @@ class AirConditionerFanSwingDevice(Device):
             data = None
         _LOGGER.debug("Filter V1 raw response for '%s': %r", self.device_info.name, data)
         if isinstance(data, dict) and data:
-            return data
+            return data, False
 
         try:
             data = await self._get_config_v2(self._FILTER_CONFIG_KEY_V2, "Get")
@@ -193,9 +199,9 @@ class AirConditionerFanSwingDevice(Device):
             data = None
         _LOGGER.debug("Filter V2 raw response for '%s': %r", self.device_info.name, data)
         if isinstance(data, dict) and data:
-            return data
+            return data, True
 
-        return None
+        return None, False
 
     async def async_get_filter_info(self) -> dict | None:
         """Fetch filter life info from wideq (V1 or V2, whichever applies).
@@ -207,14 +213,21 @@ class AirConditionerFanSwingDevice(Device):
         if self._filter_supported is False:
             return None
 
-        raw_filter = await self._async_get_raw_filter_status()
+        raw_filter, is_v2 = await self._async_get_raw_filter_status()
         if not raw_filter:
             self._filter_supported = False
             return None
 
+        use_time_field = (
+            self._FILTER_USE_TIME_FIELD_V2 if is_v2 else self._FILTER_USE_TIME_FIELD_V1
+        )
+        max_time_field = (
+            self._FILTER_MAX_TIME_FIELD_V2 if is_v2 else self._FILTER_MAX_TIME_FIELD_V1
+        )
+
         try:
-            use_time = int(raw_filter.get(self._FILTER_USE_TIME_FIELD, 0))
-            max_time = int(raw_filter.get(self._FILTER_MAX_TIME_FIELD, 0))
+            use_time = int(raw_filter.get(use_time_field, 0))
+            max_time = int(raw_filter.get(max_time_field, 0))
         except (TypeError, ValueError):
             self._filter_supported = False
             return None
@@ -272,5 +285,5 @@ class AirConditionerFanSwingDevice(Device):
         mode = MODE_ON if value else MODE_OFF
         keys = self._get_cmd_keys(CMD_STATE_WDIR_VSWING)
         if (swing_mode := self.model_info.enum_value(keys[2], mode)) is None:
-            raise ValueError(f"Invalid vertical swing mode: {mode}")
+            raise ValueError(f"Invalid horizontal swing mode: {mode}")
         await self.set(keys[0], keys[1], key=keys[2], value=swing_mode)

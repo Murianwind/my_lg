@@ -277,6 +277,7 @@ class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = _RUN_STATE_OPTIONS
     _attr_translation_key = "washer_run_state"
+    _attr_icon = "mdi:washing-machine"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
@@ -299,6 +300,7 @@ class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEnti
 
     _attr_has_entity_name = True
     _attr_name = "Remaining time"
+    _attr_icon = "mdi:timer-sand"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
@@ -323,6 +325,7 @@ class WasherCycleCountSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEnti
     _attr_has_entity_name = True
     _attr_name = "Cycle count"
     _attr_state_class = "total_increasing"
+    _attr_icon = "mdi:washing-machine-alert"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""

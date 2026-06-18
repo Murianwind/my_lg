@@ -28,6 +28,51 @@
     }
   },
   "entity": {
+    "climate": {
+      "aircon": {
+        "state_attributes": {
+          "fan_mode": {
+            "state": {
+              "SLOW": "Slow",
+              "SLOW_LOW": "Slow-low",
+              "LOW": "Low",
+              "LOW_MID": "Low-mid",
+              "MID": "Mid",
+              "MID_HIGH": "Mid-high",
+              "HIGH": "High",
+              "POWER": "Power",
+              "AUTO": "Auto",
+              "DIFFUSE": "Diffuse",
+              "R_LOW": "Right low",
+              "R_MID": "Right mid",
+              "R_HIGH": "Right high",
+              "L_LOW": "Left low",
+              "L_MID": "Left mid",
+              "L_HIGH": "Left high"
+            }
+          },
+          "swing_mode": {
+            "state": {
+              "Off": "Off",
+              "Top": "Top",
+              "MiddleTop1": "Upper middle 1",
+              "MiddleTop2": "Upper middle 2",
+              "MiddleBottom2": "Lower middle 2",
+              "MiddleBottom1": "Lower middle 1",
+              "Bottom": "Bottom",
+              "Swing": "Swing",
+              "Left": "Left",
+              "MiddleLeft": "Left middle",
+              "Center": "Center",
+              "MiddleRight": "Right middle",
+              "Right": "Right",
+              "LeftHalf": "Left half",
+              "RightHalf": "Right half"
+            }
+          }
+        }
+      }
+    },
     "sensor": {
       "washer_run_state": {
         "state": {
@@ -43,6 +88,21 @@
           "end": "Finished",
           "soaking": "Soaking",
           "error": "Error"
+        }
+      }
+    },
+    "humidifier": {
+      "dehumidifier": {
+        "state_attributes": {
+          "mode": {
+            "state": {
+              "RAPID_HUMIDITY": "Rapid dehumidify",
+              "SMART_HUMIDITY": "Smart dehumidify",
+              "INTENSIVE_DRY": "Intensive dry",
+              "QUIET_HUMIDITY": "Quiet dehumidify",
+              "CLOTHES_DRY": "Laundry dry"
+            }
+          }
         }
       }
     }

@@ -47,6 +47,7 @@ class AcEnergySavingSwitch(CoordinatorEntity[PatDeviceCoordinator], SwitchEntity
     _attr_has_entity_name = True
     _attr_name = "Energy saving"
     _attr_device_class = SwitchDeviceClass.SWITCH
+    _attr_icon = "mdi:hydro-power"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the switch."""

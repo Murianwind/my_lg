@@ -115,15 +115,23 @@ class AirConditionerFanSwingDevice(Device):
     """Fan speed / vane step control + filter life read for an LG air conditioner.
 
     Fan/swing commands are sent write-only via the unofficial wideq endpoint.
-    Filter life is also read via wideq (via the V1 "Filter" config key) because
-    the official PAT API does not expose filterInfo for this device model.
-    Call ``init_device_info()`` once after creating the client to load the model
-    metadata; no continuous polling is required for fan/swing, but the filter
-    sensor coordinator will poll ``async_get_filter_info()`` on its own schedule.
+    Filter life is also read via wideq because the official PAT API does not
+    expose filterInfo for this device model. Two API generations exist on
+    LG's backend (V1/THINQ1 and V2/THINQ2); which one a given device uses is
+    determined by `Device._should_poll` (set from the device's platformType).
+    Both are tried here, mirroring HACS ha-smartthinq-sensors'
+    ACDevice.get_filter_state / get_filter_state_v2, since this device's
+    generation isn't known ahead of time. Call ``init_device_info()`` once
+    after creating the client to load the model metadata; no continuous
+    polling is required for fan/swing, but the filter sensor coordinator
+    will poll ``async_get_filter_info()`` on its own schedule.
     """
 
-    # V1 config key and field names, same as HACS ha-smartthinq-sensors
-    _FILTER_CONFIG_KEY = "Filter"
+    # Config/control key names, identical on both V1 and V2 per HACS
+    # ha-smartthinq-sensors: the response itself is a flat dict directly
+    # containing "UseTime" / "ChangePeriod", not nested under "Filter".
+    _FILTER_CONFIG_KEY_V1 = "Filter"
+    _FILTER_CONFIG_KEY_V2 = "filterMngStateCtrl"
     _FILTER_USE_TIME_FIELD = "UseTime"
     _FILTER_MAX_TIME_FIELD = "ChangePeriod"
 
@@ -158,30 +166,42 @@ class AirConditionerFanSwingDevice(Device):
         """Return a list of available vertical step (vane position) modes."""
         return self._get_property_values(STATE_WDIR_VSTEP, ACVStepMode)
 
+    async def _async_get_raw_filter_status(self) -> dict | None:
+        """Fetch the raw filter status dict, trying V1 then V2.
+
+        `_get_config` (V1) and `_get_config_v2` (V2) are mutually exclusive
+        based on `_should_poll`, so exactly one of them can ever succeed
+        for a given device - calling both is safe and simply lets this
+        class work regardless of which API generation the device uses.
+        """
+        try:
+            data = await self._get_config(self._FILTER_CONFIG_KEY_V1)
+        except Exception:  # pylint: disable=broad-except
+            data = None
+        if isinstance(data, dict) and data:
+            return data
+
+        try:
+            data = await self._get_config_v2(self._FILTER_CONFIG_KEY_V2, "Get")
+        except Exception:  # pylint: disable=broad-except
+            data = None
+        if isinstance(data, dict) and data:
+            return data
+
+        return None
+
     async def async_get_filter_info(self) -> dict | None:
-        """Fetch filter life info from the wideq V1 'Filter' config endpoint.
+        """Fetch filter life info from wideq (V1 or V2, whichever applies).
 
         Returns a dict with keys ``use_time``, ``max_time``, and
         ``remain_percent`` if the data is available, or ``None`` if the
         device does not support this query or the data is missing.
-
-        This mirrors the logic in HACS ha-smartthinq-sensors
-        (Device._get_filter_life / ACDevice.get_filter_state).
         """
         if self._filter_supported is False:
             return None
-        try:
-            data = await self._get_config(self._FILTER_CONFIG_KEY)
-        except Exception:  # pylint: disable=broad-except
-            self._filter_supported = False
-            return None
 
-        if not isinstance(data, dict):
-            self._filter_supported = False
-            return None
-
-        raw_filter = data.get(self._FILTER_CONFIG_KEY)
-        if not isinstance(raw_filter, dict):
+        raw_filter = await self._async_get_raw_filter_status()
+        if not raw_filter:
             self._filter_supported = False
             return None
 

@@ -26,5 +26,25 @@
     "abort": {
       "already_configured": "This account is already configured."
     }
+  },
+  "entity": {
+    "sensor": {
+      "washer_run_state": {
+        "state": {
+          "running": "Running",
+          "initial": "Standby",
+          "rinsing": "Rinsing",
+          "spinning": "Spinning",
+          "firmware": "Updating firmware",
+          "reserved": "Delay start set",
+          "pause": "Paused",
+          "power_off": "Off",
+          "detecting": "Detecting load",
+          "end": "Finished",
+          "soaking": "Soaking",
+          "error": "Error"
+        }
+      }
+    }
   }
 }

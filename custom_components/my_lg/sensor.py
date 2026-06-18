@@ -57,12 +57,7 @@ async def _async_build_washer_course_sensor(
     pat_coordinator: PatDeviceCoordinator,
     pat_device_id: str,
 ) -> "WasherCourseSensor | None":
-    """Build the wideq-backed current-course sensor for a washer, if matched.
-
-    Returns None if no matching wideq washer device could be found or
-    initialized, in which case the washer simply has no course sensor
-    (the rest of the washer sensors, all PAT-based, are unaffected).
-    """
+    """Build the wideq-backed current-course sensor for a washer, if matched."""
     if runtime_data.wideq_client.devices is None:
         return None
 
@@ -131,11 +126,19 @@ async def _async_build_washer_course_sensor(
 
 
 class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
-    """Air conditioner filter remaining life sensor (PAT)."""
+    """Air conditioner filter remaining life sensor (PAT).
+
+    Exposes `used_time` / `max_time` as extra state attributes (sourced
+    from `filterInfo.usedTime` and `filterInfo.filterLifetime`), matching
+    the attribute layout other SmartThinQ-LGE-Sensors-style integrations
+    use for this same sensor.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Filter remaining"
     _attr_native_unit_of_measurement = "%"
+    _attr_state_class = "measurement"
+    _attr_icon = "mdi:air-filter"
 
     def __init__(self, coordinator: PatDeviceCoordinator) -> None:
         """Initialize the sensor."""
@@ -148,6 +151,18 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
     def native_value(self):
         """Return the remaining filter life percentage."""
         return self.coordinator.get_status(Property.FILTER_REMAIN_PERCENT)
+
+    @property
+    def extra_state_attributes(self):
+        """Return used_time / max_time, if the device reports them."""
+        attrs = {}
+        used_time = self.coordinator.get_status(Property.USED_TIME)
+        max_time = self.coordinator.get_status(Property.FILTER_LIFETIME)
+        if used_time is not None:
+            attrs["use_time"] = used_time
+        if max_time is not None:
+            attrs["max_time"] = max_time
+        return attrs or None
 
 
 _RUN_STATE_OPTIONS = [

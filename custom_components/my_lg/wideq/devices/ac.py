@@ -112,21 +112,25 @@ class ACHStepMode(Enum):
 
 
 class AirConditionerFanSwingDevice(Device):
-    """Write-only fan speed / vane step control for an LG air conditioner.
+    """Fan speed / vane step control + filter life read for an LG air conditioner.
 
-    This class intentionally does not track or decode any device status.
-    It is only used to issue control commands (fan speed, vertical/
-    horizontal vane step or swing) against the unofficial wideq endpoint,
-    while the official PAT API is the source of truth for everything
-    else (power, hvac mode, temperature). Call ``init_device_info()``
-    once after creating the client to load the model metadata required
-    to translate the enum values below into the model-specific keys the
-    device expects; no polling is required or performed afterward.
+    Fan/swing commands are sent write-only via the unofficial wideq endpoint.
+    Filter life is also read via wideq (via the V1 "Filter" config key) because
+    the official PAT API does not expose filterInfo for this device model.
+    Call ``init_device_info()`` once after creating the client to load the model
+    metadata; no continuous polling is required for fan/swing, but the filter
+    sensor coordinator will poll ``async_get_filter_info()`` on its own schedule.
     """
+
+    # V1 config key and field names, same as HACS ha-smartthinq-sensors
+    _FILTER_CONFIG_KEY = "Filter"
+    _FILTER_USE_TIME_FIELD = "UseTime"
+    _FILTER_MAX_TIME_FIELD = "ChangePeriod"
 
     def __init__(self, client: ClientAsync, device_info: DeviceInfo) -> None:
         """Initialize the device."""
         super().__init__(client, device_info, status=None)
+        self._filter_supported: bool | None = None  # None = not yet tried
 
     def _is_mode_supported(self, key) -> bool:
         """Check if a specific mode for a support key is supported."""
@@ -153,6 +157,52 @@ class AirConditionerFanSwingDevice(Device):
     def vertical_step_modes(self) -> list[str]:
         """Return a list of available vertical step (vane position) modes."""
         return self._get_property_values(STATE_WDIR_VSTEP, ACVStepMode)
+
+    async def async_get_filter_info(self) -> dict | None:
+        """Fetch filter life info from the wideq V1 'Filter' config endpoint.
+
+        Returns a dict with keys ``use_time``, ``max_time``, and
+        ``remain_percent`` if the data is available, or ``None`` if the
+        device does not support this query or the data is missing.
+
+        This mirrors the logic in HACS ha-smartthinq-sensors
+        (Device._get_filter_life / ACDevice.get_filter_state).
+        """
+        if self._filter_supported is False:
+            return None
+        try:
+            data = await self._get_config(self._FILTER_CONFIG_KEY)
+        except Exception:  # pylint: disable=broad-except
+            self._filter_supported = False
+            return None
+
+        if not isinstance(data, dict):
+            self._filter_supported = False
+            return None
+
+        raw_filter = data.get(self._FILTER_CONFIG_KEY)
+        if not isinstance(raw_filter, dict):
+            self._filter_supported = False
+            return None
+
+        try:
+            use_time = int(raw_filter.get(self._FILTER_USE_TIME_FIELD, 0))
+            max_time = int(raw_filter.get(self._FILTER_MAX_TIME_FIELD, 0))
+        except (TypeError, ValueError):
+            self._filter_supported = False
+            return None
+
+        if max_time <= 0:
+            self._filter_supported = False
+            return None
+
+        self._filter_supported = True
+        remain = int(((max_time - min(use_time, max_time)) / max_time) * 100)
+        return {
+            "use_time": use_time,
+            "max_time": max_time,
+            "remain_percent": remain,
+        }
 
     async def set_fan_speed(self, speed: str) -> None:
         """Set the fan speed to a value from the `ACFanSpeed` enum."""

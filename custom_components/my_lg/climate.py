@@ -70,6 +70,7 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
 
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_translation_key = "aircon"
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.FAN_ONLY]
     _attr_temperature_unit = "°C"
     _attr_target_temperature_step = 0.5

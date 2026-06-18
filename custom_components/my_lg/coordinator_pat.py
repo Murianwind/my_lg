@@ -15,15 +15,18 @@ import logging
 
 from thinqconnect import ThinQAPIException
 from thinqconnect.devices.air_conditioner import AirConditionerDevice
-from thinqconnect.devices.connect_device import ConnectBaseDevice
+from thinqconnect.devices.connect_device import ConnectBaseDevice, ConnectMainDevice
+from thinqconnect.devices.const import Location
 from thinqconnect.devices.dehumidifier import DehumidifierDevice
 from thinqconnect.devices.washer import WasherDevice
 from thinqconnect.thinq_api import ThinQApi
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    DOMAIN,
     PAT_DEVICE_TYPE_AC,
     PAT_DEVICE_TYPE_DEHUMIDIFIER,
     PAT_DEVICE_TYPE_WASHER,
@@ -103,8 +106,15 @@ class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
     """Polls the PAT status endpoint and keeps a device wrapper up to date.
 
     The coordinator's "data" is the device wrapper itself (already updated
-    in place via `update_status`), not a raw dict, so platform entities can
-    use the typed `get_status(Property.X)` accessors directly.
+    in place via `update_status`), not a raw dict. Reading a property
+    should always go through `get_status()` on this coordinator rather
+    than calling `device.get_status()` directly: for the washer, whose
+    thinqconnect wrapper is a `ConnectMainDevice`, properties only resolve
+    correctly via a sub-device view (`get_sub_device(Location.MAIN)`) -
+    calling `get_status()` on the main device object itself silently
+    returns None for every property. The air conditioner and dehumidifier
+    wrappers are plain `ConnectBaseDevice`s and resolve properties
+    directly, so this is handled transparently here.
     """
 
     def __init__(
@@ -124,6 +134,23 @@ class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
         )
         self.thinq_api = thinq_api
         self.device = device
+        self._status_device = device
+        if isinstance(device, ConnectMainDevice):
+            self._status_device = device.get_sub_device(Location.MAIN)
+        self.device_info = DeviceInfo(
+            identifiers={(DOMAIN, device.device_id)},
+            name=device.alias,
+            manufacturer="LGE",
+            model=device.model_name,
+        )
+
+    def get_status(self, prop):
+        """Return the current value of a property for this device.
+
+        Always use this instead of `self.device.get_status()` directly;
+        see the class docstring for why.
+        """
+        return self._status_device.get_status(prop)
 
     async def _async_update_data(self) -> ConnectBaseDevice:
         """Fetch the latest state for this device from the PAT API."""

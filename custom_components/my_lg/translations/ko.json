@@ -42,7 +42,17 @@
           "detecting": "감지 중",
           "end": "완료",
           "soaking": "불림",
-          "error": "오류"
+          "error": "오류",
+          "drying": "건조 중",
+          "add_drain": "급수",
+          "prewash": "예비 세탁",
+          "rinse_hold": "헹굼 대기",
+          "dispensing": "세제 자동 투입",
+          "refreshing": "새로 고침",
+          "detergent_amount": "세제량 안내",
+          "frozen_prevent_initial": "동결 방지 대기",
+          "frozen_prevent_running": "동결 방지 진행 중",
+          "frozen_prevent_pause": "동결 방지 일시정지"
         }
       }
     },

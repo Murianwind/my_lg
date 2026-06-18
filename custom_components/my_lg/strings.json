@@ -81,13 +81,23 @@
           "rinsing": "Rinsing",
           "spinning": "Spinning",
           "firmware": "Updating firmware",
-          "reserved": "Delay start set",
+          "reserved": "Delay set",
           "pause": "Paused",
           "power_off": "Off",
-          "detecting": "Detecting load",
+          "detecting": "Detecting",
           "end": "Finished",
-          "soaking": "Soaking",
-          "error": "Error"
+          "soaking": "Soak",
+          "error": "Error",
+          "drying": "Drying",
+          "add_drain": "Filling",
+          "prewash": "Prewashing",
+          "rinse_hold": "Waiting to rinse",
+          "dispensing": "Auto dispensing",
+          "refreshing": "Refreshing",
+          "detergent_amount": "Providing the info about the amount of detergent",
+          "frozen_prevent_initial": "Freeze protection standby",
+          "frozen_prevent_running": "Freeze protection in progress",
+          "frozen_prevent_pause": "Freeze protection paused"
         }
       }
     },

@@ -18,12 +18,15 @@ here, by design, to keep the integration lightweight.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 
 from ..backports.functools import cached_property
 from ..core_async import ClientAsync
 from ..device import Device
 from ..device_info import DeviceInfo
+
+_LOGGER = logging.getLogger(__name__)
 
 SUPPORT_RAC_SUBMODE = ["SupportRACSubMode", "support.racSubMode"]
 
@@ -176,15 +179,19 @@ class AirConditionerFanSwingDevice(Device):
         """
         try:
             data = await self._get_config(self._FILTER_CONFIG_KEY_V1)
-        except Exception:  # pylint: disable=broad-except
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.debug("Filter V1 query raised for '%s': %s", self.device_info.name, exc)
             data = None
+        _LOGGER.debug("Filter V1 raw response for '%s': %r", self.device_info.name, data)
         if isinstance(data, dict) and data:
             return data
 
         try:
             data = await self._get_config_v2(self._FILTER_CONFIG_KEY_V2, "Get")
-        except Exception:  # pylint: disable=broad-except
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.debug("Filter V2 query raised for '%s': %s", self.device_info.name, exc)
             data = None
+        _LOGGER.debug("Filter V2 raw response for '%s': %r", self.device_info.name, data)
         if isinstance(data, dict) and data:
             return data
 

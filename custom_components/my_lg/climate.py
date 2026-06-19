@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from thinqconnect import ThinQAPIException
+from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.air_conditioner import AirConditionerDevice
 from thinqconnect.devices.const import Property
 
@@ -170,6 +170,13 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
                     await self.device.set_air_con_operation_mode("POWER_ON")
                 await self.device.set_current_job_mode(pat_mode)
         except ThinQAPIException as exc:
+            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                _LOGGER.debug(
+                    "Could not set hvac_mode for '%s': device is "
+                    "momentarily not connected to the cloud",
+                    self.coordinator.device.alias,
+                )
+                return
             raise ServiceValidationError(
                 f"에어컨 모드를 변경할 수 없습니다: {exc}"
             ) from exc
@@ -191,6 +198,13 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
         if temperature is None:
             return
         hvac_mode = self.hvac_mode
+        _LOGGER.debug(
+            "async_set_temperature(%s): hvac_mode=%s, raw operation_mode=%s, raw job_mode=%s",
+            temperature,
+            hvac_mode,
+            self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE),
+            self.coordinator.get_status(Property.CURRENT_JOB_MODE),
+        )
         if hvac_mode == HVACMode.FAN_ONLY:
             _LOGGER.debug(
                 "Ignoring set_temperature(%s) while in FAN_ONLY mode "
@@ -204,6 +218,18 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
             else:
                 await self.device.set_cool_target_temperature_c(temperature)
         except ThinQAPIException as exc:
+            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                # The device is momentarily offline from LG's cloud (Wi-Fi
+                # hiccup, power-saving disconnect, etc.) - this is expected
+                # to happen occasionally and resolve itself, so it is logged
+                # quietly instead of raising a visible error on every
+                # automation run while it persists.
+                _LOGGER.debug(
+                    "Could not set temperature for '%s': device is "
+                    "momentarily not connected to the cloud",
+                    self.coordinator.device.alias,
+                )
+                return
             raise ServiceValidationError(
                 f"목표 온도를 변경할 수 없습니다: {exc}"
             ) from exc

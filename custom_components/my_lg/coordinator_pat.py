@@ -173,6 +173,7 @@ class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
         """
         if not status:
             return
+        _LOGGER.debug("handle_mqtt_status for '%s': %r", self.device.alias, status)
         self.device.update_status(status)
         self.async_set_updated_data(self.device)
 

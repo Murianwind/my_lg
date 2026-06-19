@@ -176,19 +176,32 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
         await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs) -> None:
-        """Set the target temperature via the PAT API."""
+        """Set the target temperature via the PAT API.
+
+        Silently ignored in FAN_ONLY mode: the device does not have a
+        temperature concept while blowing air only, and the PAT API
+        confirms this by rejecting the call with NOT_PROVIDED_FEATURE
+        (2201) rather than accepting and no-op'ing it. Automations that
+        blindly call climate.set_temperature regardless of the current
+        hvac_mode (e.g. day/night schedule blueprints) would otherwise
+        raise a visible error every time the AC happens to be in fan-only
+        mode at the moment the automation runs.
+        """
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
         hvac_mode = self.hvac_mode
+        if hvac_mode == HVACMode.FAN_ONLY:
+            _LOGGER.debug(
+                "Ignoring set_temperature(%s) while in FAN_ONLY mode "
+                "(device does not support a target temperature in this mode)",
+                temperature,
+            )
+            return
         try:
             if hvac_mode == HVACMode.HEAT:
                 await self.device.set_heat_target_temperature_c(temperature)
             else:
-                # COOL and FAN_ONLY both use the cool target temperature
-                # slot on this API; this matches the behavior observed on
-                # the real device profile, where only cool/heat target
-                # temperatures are independently adjustable.
                 await self.device.set_cool_target_temperature_c(temperature)
         except ThinQAPIException as exc:
             raise ServiceValidationError(

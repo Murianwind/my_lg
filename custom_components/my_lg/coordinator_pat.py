@@ -103,7 +103,18 @@ async def async_build_pat_device(
 
 
 class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
-    """Polls the PAT status endpoint and keeps a device wrapper up to date.
+    """Keeps a device wrapper up to date via MQTT push, with REST polling
+    as a low-frequency fallback safety net.
+
+    Like Home Assistant's own official `lg_thinq` integration, state
+    updates normally arrive via the AWS IoT Core MQTT connection set up in
+    mqtt.py - LG's servers push a message whenever the device's state
+    changes, so there is no need to repeatedly call the REST status
+    endpoint. REST polling (`_async_update_data`) is kept as a fallback,
+    at a much longer interval, in case the MQTT connection drops or a
+    push message is missed; relying on REST polling at a short interval
+    for 3+ devices is what caused this integration to hit PAT's "Exceeded
+    User API calls" rate limit in the first place.
 
     The coordinator's "data" is the device wrapper itself (already updated
     in place via `update_status`), not a raw dict. Reading a property
@@ -152,8 +163,28 @@ class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
         """
         return self._status_device.get_status(prop)
 
+    def handle_mqtt_status(self, status: dict) -> None:
+        """Apply a status payload received via MQTT push.
+
+        Unlike `_async_update_data`, this never calls the PAT REST API -
+        it only updates the local device wrapper from the pushed payload
+        and notifies listeners, exactly like Home Assistant's own
+        `lg_thinq` integration's `handle_update_status`.
+        """
+        if not status:
+            return
+        self.device.update_status(status)
+        self.async_set_updated_data(self.device)
+
     async def _async_update_data(self) -> ConnectBaseDevice:
-        """Fetch the latest state for this device from the PAT API."""
+        """Fetch the latest state for this device from the PAT API.
+
+        This is the low-frequency REST fallback described in the class
+        docstring; under normal operation, MQTT push (handle_mqtt_status)
+        keeps this coordinator's data current and this method is only
+        actually exercised at PAT_UPDATE_INTERVAL_SECONDS (currently a
+        long interval, see const.py).
+        """
         try:
             status = await self.thinq_api.async_get_device_status(self.device.device_id)
         except ThinQAPIException as exc:

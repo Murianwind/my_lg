@@ -214,9 +214,23 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
             return
         try:
             if hvac_mode == HVACMode.HEAT:
-                await self.device.set_heat_target_temperature_c(temperature)
+                # NOTE: intentionally NOT using
+                # device.set_heat_target_temperature_c() here. That SDK
+                # helper bundles a Property.TEMPERATURE_UNIT write into the
+                # same command (to set the unit to "C"), but on this
+                # device's PAT profile `temperature.unit` is read-only
+                # (mode: ["r"]) - sending it anyway causes the whole
+                # command to be rejected with NOT_PROVIDED_FEATURE (2201),
+                # even though the temperature value itself is writable.
+                # do_range_attribute_command sends only the temperature
+                # value, with no unit field, which the device accepts.
+                await self.device.do_range_attribute_command(
+                    Property.HEAT_TARGET_TEMPERATURE_C, temperature
+                )
             else:
-                await self.device.set_cool_target_temperature_c(temperature)
+                await self.device.do_range_attribute_command(
+                    Property.COOL_TARGET_TEMPERATURE_C, temperature
+                )
         except ThinQAPIException as exc:
             if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
                 # The device is momentarily offline from LG's cloud (Wi-Fi

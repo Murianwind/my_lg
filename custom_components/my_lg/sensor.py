@@ -119,12 +119,20 @@ class AcFilterCoordinator(DataUpdateCoordinator[dict | None]):
         )
         self._wideq_device = wideq_device
 
-    async def _async_update_data(self) -> dict | None:
-        """Fetch filter info from wideq."""
+    async def _async_update_data(self) -> dict:
+        """Fetch filter info from wideq.
+
+        Raises UpdateFailed (rather than returning None) when the data is
+        unavailable, so Home Assistant keeps the last known good value
+        instead of resetting the sensor to unknown on a transient failure.
+        """
         try:
-            return await self._wideq_device.async_get_filter_info()
+            info = await self._wideq_device.async_get_filter_info()
         except Exception as exc:  # pylint: disable=broad-except
             raise UpdateFailed(f"wideq 필터 정보 조회 실패: {exc}") from exc
+        if info is None:
+            raise UpdateFailed("wideq 필터 정보를 가져오지 못했습니다")
+        return info
 
 
 async def _async_build_washer_course_sensor(
@@ -133,7 +141,12 @@ async def _async_build_washer_course_sensor(
     pat_coordinator: PatDeviceCoordinator,
     pat_device_id: str,
 ) -> "WasherCourseSensor | None":
-    """Build the wideq-backed current-course sensor for a washer, if matched."""
+    """Build the wideq-backed current-course sensor for a washer, if matched.
+
+    Returns None if no matching wideq washer device could be found or
+    initialized, in which case the washer simply has no course sensor
+    (the rest of the washer sensors, all PAT-based, are unaffected).
+    """
     if runtime_data.wideq_client.devices is None:
         return None
 

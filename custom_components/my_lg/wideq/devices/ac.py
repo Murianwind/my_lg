@@ -145,7 +145,6 @@ class AirConditionerFanSwingDevice(Device):
     def __init__(self, client: ClientAsync, device_info: DeviceInfo) -> None:
         """Initialize the device."""
         super().__init__(client, device_info, status=None)
-        self._filter_supported: bool | None = None  # None = not yet tried
 
     def _is_mode_supported(self, key) -> bool:
         """Check if a specific mode for a support key is supported."""
@@ -209,13 +208,12 @@ class AirConditionerFanSwingDevice(Device):
         Returns a dict with keys ``use_time``, ``max_time``, and
         ``remain_percent`` if the data is available, or ``None`` if the
         device does not support this query or the data is missing.
-        """
-        if self._filter_supported is False:
-            return None
 
+        Every call re-attempts both V1 and V2; a transient failure on one
+        poll must not permanently disable subsequent polls.
+        """
         raw_filter, is_v2 = await self._async_get_raw_filter_status()
         if not raw_filter:
-            self._filter_supported = False
             return None
 
         use_time_field = (
@@ -229,14 +227,11 @@ class AirConditionerFanSwingDevice(Device):
             use_time = int(raw_filter.get(use_time_field, 0))
             max_time = int(raw_filter.get(max_time_field, 0))
         except (TypeError, ValueError):
-            self._filter_supported = False
             return None
 
         if max_time <= 0:
-            self._filter_supported = False
             return None
 
-        self._filter_supported = True
         remain = int(((max_time - min(use_time, max_time)) / max_time) * 100)
         return {
             "use_time": use_time,
@@ -285,5 +280,5 @@ class AirConditionerFanSwingDevice(Device):
         mode = MODE_ON if value else MODE_OFF
         keys = self._get_cmd_keys(CMD_STATE_WDIR_VSWING)
         if (swing_mode := self.model_info.enum_value(keys[2], mode)) is None:
-            raise ValueError(f"Invalid horizontal swing mode: {mode}")
+            raise ValueError(f"Invalid vertical swing mode: {mode}")
         await self.set(keys[0], keys[1], key=keys[2], value=swing_mode)

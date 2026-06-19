@@ -7,9 +7,13 @@ sources at the same time:
 * The official LG ThinQ Connect API (PAT - Personal Access Token), which
   is the primary source of truth for almost everything: power, hvac/job
   mode, target/current temperature, humidity, run state, filter life and
-  the washer's cycle count / remaining time. This API is comparatively
-  stable and does not suffer from the aggressive blocking that the
-  unofficial endpoint below is subject to.
+  the washer's cycle count / remaining time. State updates are delivered
+  via an AWS IoT Core MQTT push connection (see mqtt.py), exactly like
+  Home Assistant's own official `lg_thinq` integration - REST polling of
+  the status endpoint is kept only as a low-frequency fallback safety
+  net (see PAT_UPDATE_INTERVAL_SECONDS in const.py), since polling 3+
+  devices every 30 seconds previously triggered PAT's "Exceeded User API
+  calls" rate limit (error 1314) on two separate occasions.
 * The unofficial wideq client (ThinQ Web login flow, i.e. username and
   password against the LG membership website rather than the ThinQ
   mobile OAuth server), which is kept around purely as a write-only
@@ -26,15 +30,17 @@ see config_flow.py.
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 
 from thinqconnect.thinq_api import ThinQApi
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
     CONF_PAT_ACCESS_TOKEN,
@@ -45,6 +51,8 @@ from .const import (
     CONF_WIDEQ_LANGUAGE,
     CONF_WIDEQ_REGION,
     CONF_WIDEQ_REFRESH_TOKEN,
+    MQTT_SUBSCRIPTION_REFRESH_INTERVAL_SECONDS,
+    PAT_UPDATE_INTERVAL_SECONDS,
 )
 from .coordinator_pat import (
     PatDeviceCoordinator,
@@ -52,6 +60,7 @@ from .coordinator_pat import (
     async_discover_pat_devices,
 )
 from .device_router import match_wideq_to_pat
+from .mqtt import ThinQMQTT
 from .wideq import DeviceType as WideqDeviceType
 from .wideq.core_async import ClientAsync
 from .wideq.devices.ac import AirConditionerFanSwingDevice
@@ -79,6 +88,11 @@ class SmartThinqHybridRuntimeData:
         # device_id (PAT, washer only) -> wideq WMDevice, for the
         # current-course sensor. Populated in sensor.py.
         self.washer_wideq_devices: dict[str, object] = {}
+        # Set once the MQTT push connection is established (step 3.5 in
+        # async_setup_entry). None if the connection could not be made -
+        # in that case, PatDeviceCoordinator's REST fallback polling is
+        # the only source of updates.
+        self.mqtt_client: ThinQMQTT | None = None
 
 
 type SmartThinqHybridConfigEntry = ConfigEntry[SmartThinqHybridRuntimeData]
@@ -147,6 +161,48 @@ async def async_setup_entry(
             )
         runtime_data.pat_coordinators[device.device_id] = coordinator
 
+    # --- 3.5. Set up the MQTT push connection (state updates without polling) ---
+    # Mirrors Home Assistant's own official `lg_thinq` integration: device
+    # state changes are pushed over this connection instead of being
+    # discovered by repeatedly polling the REST status endpoint. Failure
+    # here is not fatal - PatDeviceCoordinator's REST fallback polling
+    # (see PAT_UPDATE_INTERVAL_SECONDS) still applies, just at a much
+    # lower frequency, so the integration remains usable (if less
+    # responsive) without a working MQTT connection.
+    mqtt_client = ThinQMQTT(
+        hass, pat_api, entry.data[CONF_PAT_CLIENT_ID], runtime_data.pat_coordinators
+    )
+    if runtime_data.pat_coordinators:
+        try:
+            if await mqtt_client.async_connect():
+                await mqtt_client.async_start_subscribes()
+                runtime_data.mqtt_client = mqtt_client
+                entry.async_on_unload(
+                    hass.bus.async_listen_once(
+                        EVENT_HOMEASSISTANT_STOP, mqtt_client.async_disconnect
+                    )
+                )
+                entry.async_on_unload(
+                    async_track_time_interval(
+                        hass,
+                        mqtt_client.async_refresh_subscribe,
+                        timedelta(seconds=MQTT_SUBSCRIPTION_REFRESH_INTERVAL_SECONDS),
+                        cancel_on_shutdown=True,
+                    )
+                )
+            else:
+                _LOGGER.warning(
+                    "Could not establish the MQTT push connection; falling back "
+                    "to REST polling only (interval: %s seconds)",
+                    PAT_UPDATE_INTERVAL_SECONDS,
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.warning(
+                "Error setting up the MQTT push connection; falling back to "
+                "REST polling only: %s",
+                exc,
+            )
+
     # --- 4. Match wideq AC devices to their PAT counterpart for fan/swing ---
     if wideq_client.devices:
         for wideq_device_info in wideq_client.devices:
@@ -193,5 +249,7 @@ async def async_unload_entry(
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok and entry.runtime_data:
+        if entry.runtime_data.mqtt_client is not None:
+            await entry.runtime_data.mqtt_client.async_disconnect()
         await entry.runtime_data.wideq_client.close()
     return unload_ok

@@ -22,23 +22,33 @@ DATA_PAT_API = "pat_api"
 DATA_DEVICE_PAIRS = "device_pairs"
 
 # --- Platforms ---
-PLATFORMS = ["climate", "humidifier", "sensor"]
+PLATFORMS = ["climate", "humidifier", "sensor", "switch"]
 
 # --- Defaults ---
 DEFAULT_COUNTRY = "KR"
 DEFAULT_LANGUAGE = "ko-KR"
 
-# PAT polling interval for the main coordinator (air conditioner / dehumidifier
-# / washer state). The official API is not subject to the aggressive blocking
-# that the unofficial wideq endpoint suffers from, so a comparatively short
-# interval is safe here.
-PAT_UPDATE_INTERVAL_SECONDS = 30
+# REST polling fallback interval for PatDeviceCoordinator. Under normal
+# operation this is barely used: state updates arrive via MQTT push (see
+# mqtt.py), exactly like Home Assistant's own official `lg_thinq`
+# integration. This interval only matters if the MQTT connection drops or
+# a push message is missed. A short interval here (the original value was
+# 30 seconds) is NOT safe: polling 3 devices every 30 seconds is what
+# caused this integration to hit PAT's "Exceeded User API calls" rate
+# limit (error 1314) on two separate occasions.
+PAT_UPDATE_INTERVAL_SECONDS = 3600
 
 # wideq is never polled on a fixed schedule for the air conditioner (it is
 # used purely as a write-only command channel for fan/swing). For the washer
 # "current course" sensor, wideq IS polled, but only while the washer is
 # actually running (see coordinator_course.py), and at this interval.
 WASHER_COURSE_UPDATE_INTERVAL_SECONDS = 300
+
+# How often to refresh (re-register) MQTT push/event subscriptions.
+# Subscriptions expire and must be periodically renewed; this matches the
+# interval Home Assistant's own official `lg_thinq` integration uses
+# (MQTT_SUBSCRIPTION_INTERVAL = timedelta(days=1)).
+MQTT_SUBSCRIPTION_REFRESH_INTERVAL_SECONDS = 86400
 
 # PAT device type strings (as returned by GET /devices)
 PAT_DEVICE_TYPE_AC = "DEVICE_AIR_CONDITIONER"

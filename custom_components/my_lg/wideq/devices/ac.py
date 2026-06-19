@@ -46,12 +46,14 @@ STATE_WDIR_HSTEP = ["WDirHStep", "airState.wDir.hStep"]
 STATE_WDIR_VSTEP = ["WDirVStep", "airState.wDir.vStep"]
 STATE_WDIR_HSWING = ["WDirLeftRight", "airState.wDir.leftRight"]
 STATE_WDIR_VSWING = ["WDirUpDown", "airState.wDir.upDown"]
+STATE_TARGET_TEMP = ["TempCfg", "airState.tempState.target"]
 
 CMD_STATE_WIND_STRENGTH = [CTRL_BASIC, "Set", STATE_WIND_STRENGTH]
 CMD_STATE_WDIR_HSTEP = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_HSTEP]
 CMD_STATE_WDIR_VSTEP = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_VSTEP]
 CMD_STATE_WDIR_HSWING = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_HSWING]
 CMD_STATE_WDIR_VSWING = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_VSWING]
+CMD_STATE_TARGET_TEMP = [CTRL_BASIC, "Set", STATE_TARGET_TEMP]
 
 MODE_OFF = "@OFF"
 MODE_ON = "@ON"
@@ -238,6 +240,22 @@ class AirConditionerFanSwingDevice(Device):
             "max_time": max_time,
             "remain_percent": remain,
         }
+
+    async def async_set_target_temperature(self, temperature: float) -> None:
+        """Set the target temperature via wideq (write-only, no polling).
+
+        Used instead of the PAT API for temperature control because PAT's
+        coolTargetTemperature/heatTargetTemperature step is fixed per
+        device model and, on this user's unit, is 1 whole degree -
+        sending a 0.5-step value is rejected by the PAT server with
+        INVALID_COMMAND_ERROR (2207). wideq's airState.tempState.target
+        key accepts half-degree values directly, matching what the LG
+        ThinQ mobile app itself sends, and is what HACS
+        ha-smartthinq-sensors uses for the same purpose
+        (AirConditionerDevice.set_target_temp).
+        """
+        keys = self._get_cmd_keys(CMD_STATE_TARGET_TEMP)
+        await self.set(keys[0], keys[1], key=keys[2], value=temperature)
 
     async def set_fan_speed(self, speed: str) -> None:
         """Set the fan speed to a value from the `ACFanSpeed` enum."""

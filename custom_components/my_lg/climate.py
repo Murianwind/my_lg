@@ -27,6 +27,7 @@ Home Assistant restarts instead of resetting to nothing every time.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
@@ -47,6 +48,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_AC
 from .coordinator_pat import PatDeviceCoordinator
+from .wideq.core_exceptions import APIError as WideqAPIError
 from .wideq.devices.ac import AirConditionerFanSwingDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,6 +66,22 @@ _HVAC_TO_PAT_JOB_MODE = {v: k for k, v in _PAT_JOB_MODE_TO_HVAC.items()}
 _TARGET_TEMPERATURE_STEP = 0.5
 _DEFAULT_MIN_TEMP = 18.0
 _DEFAULT_MAX_TEMP = 30.0
+
+# wideq result codes observed to be transient (the device was momentarily
+# busy processing a previous command) rather than a real rejection of the
+# command itself. Retrying once after a short delay clears these in
+# practice; "0103" was seen in real logs immediately following a previous
+# command sent 0.3s earlier for the same device, with the retried command
+# succeeding ("0000") less than half a second later.
+_WIDEQ_TRANSIENT_RESULT_CODES = {"0103", "0111", "0100"}
+
+# How long to wait, debouncing rapid repeated calls (e.g. dragging a slider,
+# or an automation re-triggering before the previous command's response
+# arrives), before actually sending the command to wideq.
+_WIDEQ_COMMAND_DEBOUNCE_SECONDS = 0.4
+
+# How long to wait before a single retry after a transient wideq failure.
+_WIDEQ_RETRY_DELAY_SECONDS = 0.6
 
 
 async def async_setup_entry(
@@ -120,6 +138,12 @@ class SmartThinqHybridClimateEntity(
         self._last_fan_mode: str | None = None
         self._last_swing_mode: str | None = None
         self._last_target_temperature: float | None = None
+
+        # Debounce handle for async_set_temperature: rapid repeated calls
+        # (slider drags, automations re-triggering quickly) cancel any
+        # pending send and replace it with a new one, so only the final
+        # value is actually sent to wideq.
+        self._pending_temperature_task: asyncio.Task | None = None
 
         if fan_swing_device is not None:
             if fan_swing_device.fan_speeds:
@@ -251,6 +275,16 @@ class SmartThinqHybridClimateEntity(
 
         Silently ignored in FAN_ONLY mode: the device does not have a
         temperature concept while blowing air only.
+
+        The UI-facing state updates immediately (optimistic), but the
+        actual command to wideq is debounced: if this is called again
+        within _WIDEQ_COMMAND_DEBOUNCE_SECONDS (e.g. a slider being
+        dragged, or an automation re-triggering quickly), the previous
+        pending send is cancelled and only the latest value is actually
+        sent. This avoids firing near-simultaneous commands at wideq,
+        which has been observed to reject one of them with a transient
+        result code (e.g. "0103") when two commands for the same device
+        arrive within a few hundred milliseconds of each other.
         """
         temperature = kwargs.get("temperature")
         if temperature is None:
@@ -270,12 +304,68 @@ class SmartThinqHybridClimateEntity(
             raise ServiceValidationError(
                 "이 에어컨은 온도 제어를 위한 wideq 연동이 설정되어 있지 않습니다."
             )
-        try:
-            await self._fan_swing_device.async_set_target_temperature(temperature)
-        except Exception as exc:  # pylint: disable=broad-except
-            raise ServiceValidationError(f"목표 온도를 변경할 수 없습니다: {exc}") from exc
+
         self._last_target_temperature = temperature
         self.async_write_ha_state()
+
+        if self._pending_temperature_task is not None:
+            self._pending_temperature_task.cancel()
+        self._pending_temperature_task = self.hass.async_create_task(
+            self._async_debounced_set_temperature(temperature)
+        )
+
+    async def _async_debounced_set_temperature(self, temperature: float) -> None:
+        """Wait out the debounce window, then send the temperature to wideq.
+
+        Cancellation (a newer call superseding this one) is expected and
+        silently swallowed - only the final value in a burst should ever
+        reach the device.
+        """
+        try:
+            await asyncio.sleep(_WIDEQ_COMMAND_DEBOUNCE_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        try:
+            await self._async_send_wideq_command(
+                lambda: self._fan_swing_device.async_set_target_temperature(temperature),
+                description=f"목표 온도({temperature})",
+            )
+        except ServiceValidationError:
+            _LOGGER.warning(
+                "Could not set temperature to %s for '%s' after retry",
+                temperature,
+                self.coordinator.device.alias,
+            )
+
+    async def _async_send_wideq_command(self, retry_call, *, description: str) -> None:
+        """Send a wideq command, retrying once after a transient failure.
+
+        `retry_call` is a zero-argument callable returning a fresh
+        coroutine, since a coroutine object can only be awaited once and
+        a retry needs to issue the command again from scratch.
+        """
+        try:
+            await retry_call()
+            return
+        except WideqAPIError as exc:
+            if exc.code not in _WIDEQ_TRANSIENT_RESULT_CODES:
+                raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc
+            _LOGGER.debug(
+                "Transient wideq error (%s) setting %s for '%s'; retrying in %ss",
+                exc.code,
+                description,
+                self.coordinator.device.alias,
+                _WIDEQ_RETRY_DELAY_SECONDS,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc
+
+        await asyncio.sleep(_WIDEQ_RETRY_DELAY_SECONDS)
+        try:
+            await retry_call()
+        except Exception as exc:  # pylint: disable=broad-except
+            raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Send a fan speed command via wideq (write-only, no polling)."""
@@ -283,10 +373,10 @@ class SmartThinqHybridClimateEntity(
             raise ServiceValidationError(
                 "이 에어컨은 풍속 제어를 위한 wideq 연동이 설정되어 있지 않습니다."
             )
-        try:
-            await self._fan_swing_device.set_fan_speed(fan_mode)
-        except Exception as exc:  # pylint: disable=broad-except
-            raise ServiceValidationError(f"풍속을 변경할 수 없습니다: {exc}") from exc
+        await self._async_send_wideq_command(
+            lambda: self._fan_swing_device.set_fan_speed(fan_mode),
+            description="풍속",
+        )
         self._last_fan_mode = fan_mode
         self.async_write_ha_state()
 
@@ -296,14 +386,10 @@ class SmartThinqHybridClimateEntity(
             raise ServiceValidationError(
                 "이 에어컨은 회전(스윙) 제어를 위한 wideq 연동이 설정되어 있지 않습니다."
             )
-        try:
-            if self._fan_swing_device.vertical_step_modes:
-                await self._fan_swing_device.set_vertical_step_mode(swing_mode)
-            else:
-                await self._fan_swing_device.set_horizontal_step_mode(swing_mode)
-        except Exception as exc:  # pylint: disable=broad-except
-            raise ServiceValidationError(
-                f"회전(스윙) 모드를 변경할 수 없습니다: {exc}"
-            ) from exc
+        if self._fan_swing_device.vertical_step_modes:
+            send = lambda: self._fan_swing_device.set_vertical_step_mode(swing_mode)
+        else:
+            send = lambda: self._fan_swing_device.set_horizontal_step_mode(swing_mode)
+        await self._async_send_wideq_command(send, description="회전(스윙) 모드")
         self._last_swing_mode = swing_mode
         self.async_write_ha_state()

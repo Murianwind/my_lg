@@ -1,15 +1,28 @@
 """Climate platform for the air conditioner.
 
-Power, hvac mode and target/current temperature are all driven by the
-official PAT API (via the PatDeviceCoordinator). Fan speed and vane
-position/swing are driven by wideq instead, since the official API only
-exposes a coarse 4-level fan speed and a simple up/down on-off flag,
-while wideq exposes the device's full 6+ level fan speed and 8-position
-vane stepping. wideq is used purely as a write-only command channel here:
-no polling happens for fan/swing, and the displayed value is simply the
-last value this integration commanded (optimistic update). See the
-architecture notes in coordinator_pat.py and coordinator_course.py for
-the reasoning behind this split.
+Power and hvac mode are driven by the official PAT API (via the
+PatDeviceCoordinator), since that part of the API is reliable and not
+subject to the rate limiting/blocking the unofficial endpoint suffers
+from. Target temperature, fan speed, and vane position/swing are all
+driven by wideq instead:
+
+* Fan speed and vane stepping are not exposed by the official API at
+  all (it only offers a coarse 4-level fan speed and a simple up/down
+  on-off flag), so wideq is the only option.
+* Target temperature IS exposed by PAT, but PAT's coolTargetTemperature/
+  heatTargetTemperature step is fixed per device model - on this user's
+  unit it is 1 whole degree, and sending a 0.5-step value is rejected by
+  the PAT server with INVALID_COMMAND_ERROR (2207). wideq's
+  airState.tempState.target key accepts half-degree values directly
+  (matching what the LG ThinQ mobile app itself sends), so it is used
+  here instead to allow 0.5-degree control.
+
+wideq is used purely as a write-only command channel for all three: no
+polling happens against it, current_temperature still comes from PAT
+(it is read-only there and unaffected by the above issue). Since there
+is no read-back for fan_mode/swing_mode/target_temperature, this entity
+is also a RestoreEntity: the last commanded values are persisted across
+Home Assistant restarts instead of resetting to nothing every time.
 """
 
 from __future__ import annotations
@@ -28,6 +41,7 @@ from homeassistant.components.climate import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SmartThinqHybridConfigEntry
@@ -45,6 +59,11 @@ _PAT_JOB_MODE_TO_HVAC = {
     "FAN": HVACMode.FAN_ONLY,
 }
 _HVAC_TO_PAT_JOB_MODE = {v: k for k, v in _PAT_JOB_MODE_TO_HVAC.items()}
+
+# wideq accepts half-degree steps directly (see module docstring).
+_TARGET_TEMPERATURE_STEP = 0.5
+_DEFAULT_MIN_TEMP = 18.0
+_DEFAULT_MAX_TEMP = 30.0
 
 
 async def async_setup_entry(
@@ -65,15 +84,17 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], ClimateEntity):
-    """Air conditioner climate entity (PAT power/mode/temp + wideq fan/swing)."""
+class SmartThinqHybridClimateEntity(
+    CoordinatorEntity[PatDeviceCoordinator], RestoreEntity, ClimateEntity
+):
+    """Air conditioner climate entity (PAT power/mode + wideq temp/fan/swing)."""
 
     _attr_has_entity_name = True
     _attr_name = None
     _attr_translation_key = "aircon"
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.FAN_ONLY]
     _attr_temperature_unit = "°C"
-    _attr_target_temperature_step = 0.5
+    _attr_target_temperature_step = _TARGET_TEMPERATURE_STEP
 
     def __init__(
         self,
@@ -93,8 +114,12 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
 
         self._attr_fan_modes: list[str] | None = None
         self._attr_swing_modes: list[str] | None = None
+        # All three are write-only via wideq (no status read-back), so the
+        # last commanded value is all there is to report. Restored from
+        # the entity's last known state in async_added_to_hass.
         self._last_fan_mode: str | None = None
         self._last_swing_mode: str | None = None
+        self._last_target_temperature: float | None = None
 
         if fan_swing_device is not None:
             if fan_swing_device.fan_speeds:
@@ -113,6 +138,44 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
 
         self._attr_supported_features = supported_features
 
+    async def async_added_to_hass(self) -> None:
+        """Restore the last commanded fan/swing/temperature after a restart.
+
+        fan_mode, swing_mode and target_temperature all go through wideq,
+        which is write-only here - there is no PAT or wideq status read-back
+        to repopulate them from, so without this they would silently reset
+        to None (shown as blank in the UI) every time Home Assistant
+        restarts, even though the air conditioner itself kept running with
+        its last settings.
+        """
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is None:
+            return
+
+        restored_fan_mode = last_state.attributes.get("fan_mode")
+        if restored_fan_mode in (self._attr_fan_modes or []):
+            self._last_fan_mode = restored_fan_mode
+
+        restored_swing_mode = last_state.attributes.get("swing_mode")
+        if restored_swing_mode in (self._attr_swing_modes or []):
+            self._last_swing_mode = restored_swing_mode
+
+        restored_temperature = last_state.attributes.get("temperature")
+        if restored_temperature is not None:
+            try:
+                self._last_target_temperature = float(restored_temperature)
+            except (TypeError, ValueError):
+                pass
+
+        _LOGGER.debug(
+            "Restored last state for '%s': fan_mode=%s, swing_mode=%s, target_temperature=%s",
+            self.coordinator.device.alias,
+            self._last_fan_mode,
+            self._last_swing_mode,
+            self._last_target_temperature,
+        )
+
     @property
     def device(self) -> AirConditionerDevice:
         """Return the PAT device wrapper."""
@@ -129,23 +192,24 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
 
     @property
     def current_temperature(self) -> float | None:
-        """Return the current temperature."""
+        """Return the current temperature (read-only on PAT, unaffected
+        by the step-size issue that moved target_temperature to wideq)."""
         return self.coordinator.get_status(Property.CURRENT_TEMPERATURE_C)
 
     @property
-    def target_temperature(self) -> float | None:
-        """Return the target temperature."""
-        return self.coordinator.get_status(Property.TARGET_TEMPERATURE_C)
-
-    @property
     def min_temp(self) -> float:
-        """Return the minimum supported temperature."""
-        return self.coordinator.get_status(Property.MIN_TARGET_TEMPERATURE_C) or 18.0
+        """Return the minimum supported temperature (read-only on PAT)."""
+        return self.coordinator.get_status(Property.MIN_TARGET_TEMPERATURE_C) or _DEFAULT_MIN_TEMP
 
     @property
     def max_temp(self) -> float:
-        """Return the maximum supported temperature."""
-        return self.coordinator.get_status(Property.MAX_TARGET_TEMPERATURE_C) or 30.0
+        """Return the maximum supported temperature (read-only on PAT)."""
+        return self.coordinator.get_status(Property.MAX_TARGET_TEMPERATURE_C) or _DEFAULT_MAX_TEMP
+
+    @property
+    def target_temperature(self) -> float | None:
+        """Return the last commanded target temperature (optimistic, not polled)."""
+        return self._last_target_temperature
 
     @property
     def fan_mode(self) -> str | None:
@@ -183,27 +247,17 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
         await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs) -> None:
-        """Set the target temperature via the PAT API.
+        """Set the target temperature via wideq (write-only, no polling).
 
         Silently ignored in FAN_ONLY mode: the device does not have a
-        temperature concept while blowing air only, and the PAT API
-        confirms this by rejecting the call with NOT_PROVIDED_FEATURE
-        (2201) rather than accepting and no-op'ing it. Automations that
-        blindly call climate.set_temperature regardless of the current
-        hvac_mode (e.g. day/night schedule blueprints) would otherwise
-        raise a visible error every time the AC happens to be in fan-only
-        mode at the moment the automation runs.
+        temperature concept while blowing air only.
         """
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
         hvac_mode = self.hvac_mode
         _LOGGER.debug(
-            "async_set_temperature(%s): hvac_mode=%s, raw operation_mode=%s, raw job_mode=%s",
-            temperature,
-            hvac_mode,
-            self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE),
-            self.coordinator.get_status(Property.CURRENT_JOB_MODE),
+            "async_set_temperature(%s): hvac_mode=%s", temperature, hvac_mode
         )
         if hvac_mode == HVACMode.FAN_ONLY:
             _LOGGER.debug(
@@ -212,42 +266,16 @@ class SmartThinqHybridClimateEntity(CoordinatorEntity[PatDeviceCoordinator], Cli
                 temperature,
             )
             return
-        try:
-            if hvac_mode == HVACMode.HEAT:
-                # NOTE: intentionally NOT using
-                # device.set_heat_target_temperature_c() here. That SDK
-                # helper bundles a Property.TEMPERATURE_UNIT write into the
-                # same command (to set the unit to "C"), but on this
-                # device's PAT profile `temperature.unit` is read-only
-                # (mode: ["r"]) - sending it anyway causes the whole
-                # command to be rejected with NOT_PROVIDED_FEATURE (2201),
-                # even though the temperature value itself is writable.
-                # do_range_attribute_command sends only the temperature
-                # value, with no unit field, which the device accepts.
-                await self.device.do_range_attribute_command(
-                    Property.HEAT_TARGET_TEMPERATURE_C, temperature
-                )
-            else:
-                await self.device.do_range_attribute_command(
-                    Property.COOL_TARGET_TEMPERATURE_C, temperature
-                )
-        except ThinQAPIException as exc:
-            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
-                # The device is momentarily offline from LG's cloud (Wi-Fi
-                # hiccup, power-saving disconnect, etc.) - this is expected
-                # to happen occasionally and resolve itself, so it is logged
-                # quietly instead of raising a visible error on every
-                # automation run while it persists.
-                _LOGGER.debug(
-                    "Could not set temperature for '%s': device is "
-                    "momentarily not connected to the cloud",
-                    self.coordinator.device.alias,
-                )
-                return
+        if self._fan_swing_device is None:
             raise ServiceValidationError(
-                f"목표 온도를 변경할 수 없습니다: {exc}"
-            ) from exc
-        await self.coordinator.async_request_refresh()
+                "이 에어컨은 온도 제어를 위한 wideq 연동이 설정되어 있지 않습니다."
+            )
+        try:
+            await self._fan_swing_device.async_set_target_temperature(temperature)
+        except Exception as exc:  # pylint: disable=broad-except
+            raise ServiceValidationError(f"목표 온도를 변경할 수 없습니다: {exc}") from exc
+        self._last_target_temperature = temperature
+        self.async_write_ha_state()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Send a fan speed command via wideq (write-only, no polling)."""

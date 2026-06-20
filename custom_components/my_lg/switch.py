@@ -8,18 +8,17 @@ from __future__ import annotations
 
 import logging
 
-from thinqconnect import ThinQAPIException
+from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.const import Property
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_AC
-from .coordinator_pat import PatDeviceCoordinator
+from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +40,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class AcEnergySavingSwitch(CoordinatorEntity[PatDeviceCoordinator], SwitchEntity):
+class AcEnergySavingSwitch(PatCoordinatorEntity, SwitchEntity):
     """Air conditioner energy-saving switch (PAT)."""
 
     _attr_has_entity_name = True
@@ -61,22 +60,35 @@ class AcEnergySavingSwitch(CoordinatorEntity[PatDeviceCoordinator], SwitchEntity
         """Return whether energy saving is currently enabled."""
         return self.coordinator.get_status(Property.POWER_SAVE_ENABLED)
 
+    async def _async_set_power_save(self, enabled: bool) -> None:
+        """Send the power-save command, handling NOT_CONNECTED_DEVICE.
+
+        See the matching helper in humidifier.py for why
+        NOT_CONNECTED_DEVICE is treated as "go unavailable" rather than
+        a visible error.
+        """
+        try:
+            await self.coordinator.device.set_power_save_enabled(enabled)
+        except ThinQAPIException as exc:
+            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                _LOGGER.debug(
+                    "Could not set energy saving for '%s': device is "
+                    "momentarily not connected to the cloud",
+                    self.coordinator.device.alias,
+                )
+                self.coordinator.mark_unreachable()
+                return
+            state = "켤" if enabled else "끌"
+            raise ServiceValidationError(
+                f"에너지 절약 모드를 {state} 수 없습니다: {exc}"
+            ) from exc
+        self.coordinator.mark_reachable()
+        await self.coordinator.async_request_refresh()
+
     async def async_turn_on(self, **kwargs) -> None:
         """Enable energy saving."""
-        try:
-            await self.coordinator.device.set_power_save_enabled(True)
-        except ThinQAPIException as exc:
-            raise ServiceValidationError(
-                f"에너지 절약 모드를 켤 수 없습니다: {exc}"
-            ) from exc
-        await self.coordinator.async_request_refresh()
+        await self._async_set_power_save(True)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Disable energy saving."""
-        try:
-            await self.coordinator.device.set_power_save_enabled(False)
-        except ThinQAPIException as exc:
-            raise ServiceValidationError(
-                f"에너지 절약 모드를 끌 수 없습니다: {exc}"
-            ) from exc
-        await self.coordinator.async_request_refresh()
+        await self._async_set_power_save(False)

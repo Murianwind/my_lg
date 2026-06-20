@@ -30,7 +30,7 @@ see config_flow.py.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 
 from thinqconnect.thinq_api import ThinQApi
@@ -113,6 +113,11 @@ async def async_setup_entry(
         new_data[CONF_WIDEQ_CLIENT_ID_CREATED_ON] = created_on.isoformat()
         hass.config_entries.async_update_entry(entry, data=new_data)
 
+    stored_created_on = entry.data.get(CONF_WIDEQ_CLIENT_ID_CREATED_ON)
+    client_id_created_on = (
+        datetime.fromisoformat(stored_created_on) if stored_created_on else None
+    )
+
     try:
         wideq_client = await ClientAsync.from_token(
             entry.data[CONF_WIDEQ_REFRESH_TOKEN],
@@ -120,6 +125,7 @@ async def async_setup_entry(
             language=entry.data.get(CONF_WIDEQ_LANGUAGE, "ko-KR"),
             aiohttp_session=session,
             client_id=entry.data.get(CONF_WIDEQ_CLIENT_ID),
+            client_id_created_on=client_id_created_on,
             update_clientid_callback=_persist_wideq_client_id,
         )
     except Exception as exc:  # pylint: disable=broad-except

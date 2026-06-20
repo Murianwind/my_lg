@@ -4,7 +4,7 @@ and the washer's current-course sensor (wideq, trigger-polled).
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 from thinqconnect.devices.const import Property
@@ -379,7 +379,6 @@ class WasherRemainTimeSensor(PatCoordinatorEntity, SensorEntity):
         fail the whole sensor update. Treat any non-numeric value the
         same as a missing one.
         """
-        from datetime import datetime, timedelta, timezone
         hour = self.coordinator.get_status(Property.REMAIN_HOUR)
         minute = self.coordinator.get_status(Property.REMAIN_MINUTE)
         if hour is None or minute is None:

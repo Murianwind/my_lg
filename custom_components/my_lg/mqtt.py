@@ -170,17 +170,31 @@ class ThinQMQTT:
     ) -> None:
         """Handle a raw MQTT message (runs on the MQTT client's own thread).
 
-        Schedules `_async_handle_device_event` on the main event loop and
-        returns immediately, instead of blocking this thread until it
-        finishes: `run_coroutine_threadsafe` itself is non-blocking, and
-        `add_done_callback` lets `_on_handling_done` observe the result
-        (and log any exception) once the main loop gets around to it,
-        without holding up this thread - and therefore without delaying
-        any further incoming MQTT messages - in the meantime.
+        Both payload.decode() and json.loads() are wrapped in the same try
+        block: this callback is invoked directly from the underlying
+        awscrt/AWS IoT Core C extension's callback dispatch (see
+        ThinQMQTTClient -> mqtt_connection.subscribe(callback=...)), which
+        has no exception handling of its own around this call - letting a
+        UnicodeDecodeError (a malformed/non-UTF-8 payload) or a ValueError
+        (malformed JSON) escape here would cross that C extension boundary
+        with an unhandled Python exception, which is not a state to risk
+        relying on this MQTT thread continuing to work correctly afterward.
+
+        Once parsed, schedules `_async_handle_device_event` on the main
+        event loop and returns immediately, instead of blocking this thread
+        until it finishes: `run_coroutine_threadsafe` itself is
+        non-blocking, and `add_done_callback` lets `_on_handling_done`
+        observe the result (and log any exception) once the main loop gets
+        around to it, without holding up this thread - and therefore
+        without delaying any further incoming MQTT messages - in the
+        meantime.
         """
-        decoded = payload.decode()
         try:
+            decoded = payload.decode()
             message = json.loads(decoded)
+        except UnicodeDecodeError:
+            _LOGGER.error("Failed to decode MQTT message payload: %r", payload)
+            return
         except ValueError:
             _LOGGER.error("Failed to parse MQTT message: payload=%s", decoded)
             return

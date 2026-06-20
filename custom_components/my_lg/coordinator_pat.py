@@ -23,7 +23,11 @@ from thinqconnect.thinq_api import ThinQApi
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .const import (
     DOMAIN,
@@ -154,6 +158,55 @@ class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
             manufacturer="LGE",
             model=device.model_name,
         )
+        # Tracks whether the device is currently reachable on LG's cloud,
+        # separately from last_update_success. MQTT push and REST polling
+        # both only tell us the device WAS reachable as of their last
+        # message - they have no way to proactively notice a disconnect,
+        # since LG does not push a "the device just went offline" message.
+        # The one place that DOES see this in real time is command
+        # delivery: the PAT API returns NOT_CONNECTED_DEVICE (and wideq
+        # raises NotConnectedError) when a command is sent to a device
+        # that is not currently online. Platforms call mark_unreachable()
+        # when they see that, and any successful status update (push or
+        # poll) calls mark_reachable() to clear it again.
+        self._device_reachable = True
+
+    @property
+    def available(self) -> bool:
+        """Return whether this device's data is current AND it is reachable.
+
+        last_update_success alone is not enough: under MQTT push, it
+        stays True indefinitely once a push or poll has succeeded, even
+        long after the device actually went offline, since the absence of
+        further push messages is not itself an error. _device_reachable
+        is the additional signal set from command-delivery failures; see
+        the docstring on it in __init__.
+        """
+        return self.last_update_success and self._device_reachable
+
+    def mark_unreachable(self) -> None:
+        """Record that a command just failed because the device is offline.
+
+        Called by platform entities when they receive NOT_CONNECTED_DEVICE
+        (PAT) or a wideq NotConnectedError while trying to send a command.
+        Triggers an immediate availability update rather than waiting for
+        the next push message or the REST fallback poll.
+        """
+        if not self._device_reachable:
+            return
+        _LOGGER.debug(
+            "Marking '%s' unreachable after a failed command", self.device.alias
+        )
+        self._device_reachable = False
+        self.async_update_listeners()
+
+    def mark_reachable(self) -> None:
+        """Clear the unreachable flag, e.g. after a successful status update."""
+        if self._device_reachable:
+            return
+        _LOGGER.debug("Marking '%s' reachable again", self.device.alias)
+        self._device_reachable = True
+        self.async_update_listeners()
 
     def get_status(self, prop):
         """Return the current value of a property for this device.
@@ -169,12 +222,14 @@ class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
         Unlike `_async_update_data`, this never calls the PAT REST API -
         it only updates the local device wrapper from the pushed payload
         and notifies listeners, exactly like Home Assistant's own
-        `lg_thinq` integration's `handle_update_status`.
+        `lg_thinq` integration's `handle_update_status`. Receiving any
+        push message at all implies the device is reachable.
         """
         if not status:
             return
         _LOGGER.debug("handle_mqtt_status for '%s': %r", self.device.alias, status)
         self.device.update_status(status)
+        self.mark_reachable()
         self.async_set_updated_data(self.device)
 
     async def _async_update_data(self) -> ConnectBaseDevice:
@@ -197,4 +252,23 @@ class PatDeviceCoordinator(DataUpdateCoordinator[ConnectBaseDevice]):
                 f"PAT status update returned no data for {self.device.alias}"
             )
         self.device.update_status(status)
+        self.mark_reachable()
         return self.device
+
+
+class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
+    """Base class for all entities backed by a PatDeviceCoordinator.
+
+    `CoordinatorEntity.available` only checks `coordinator.last_update_success`
+    - it has no knowledge of `PatDeviceCoordinator.available`, which also
+    factors in `_device_reachable` (see that class's docstring). Every
+    platform entity backed by a PatDeviceCoordinator should inherit from
+    this instead of `CoordinatorEntity[PatDeviceCoordinator]` directly, or
+    entities will silently stay "available" after a command fails with
+    NOT_CONNECTED_DEVICE.
+    """
+
+    @property
+    def available(self) -> bool:
+        """Return whether the underlying device is available."""
+        return self.coordinator.available

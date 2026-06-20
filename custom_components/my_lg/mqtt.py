@@ -18,6 +18,7 @@ PatDeviceCoordinator as a low-frequency fallback only.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime
 import json
 import logging
@@ -159,6 +160,14 @@ class ThinQMQTT:
         if (count := self._count_subscribe_failures(results)) > 0:
             _LOGGER.error("Failed to end MQTT subscription on %s device(s)", count)
 
+    # Safety cap on how long the MQTT client's own thread will wait for
+    # _async_handle_device_event to run on the main event loop. Normal
+    # handling is purely local (dict updates + listener callbacks, no
+    # network I/O) and completes in well under this, but a hard cap
+    # prevents an unexpected stall on the main loop from blocking the
+    # MQTT thread (and therefore further incoming messages) indefinitely.
+    _MESSAGE_HANDLING_TIMEOUT_SECONDS = 5
+
     def _on_message_received(
         self,
         topic: str,
@@ -168,7 +177,15 @@ class ThinQMQTT:
         retain: bool,
         **kwargs: dict,
     ) -> None:
-        """Handle a raw MQTT message (runs on the MQTT client's own thread)."""
+        """Handle a raw MQTT message (runs on the MQTT client's own thread).
+
+        Waits for `_async_handle_device_event` to finish on the main event
+        loop (bounded by `_MESSAGE_HANDLING_TIMEOUT_SECONDS`) rather than
+        firing it and returning immediately: `run_coroutine_threadsafe`
+        silently drops any exception raised inside the coroutine unless
+        something calls `.result()` (or attaches a callback) on the
+        returned Future, which would otherwise hide real bugs here.
+        """
         decoded = payload.decode()
         try:
             message = json.loads(decoded)
@@ -176,9 +193,20 @@ class ThinQMQTT:
             _LOGGER.error("Failed to parse MQTT message: payload=%s", decoded)
             return
 
-        asyncio.run_coroutine_threadsafe(
+        future = asyncio.run_coroutine_threadsafe(
             self._async_handle_device_event(message), self.hass.loop
-        ).result()
+        )
+        try:
+            future.result(timeout=self._MESSAGE_HANDLING_TIMEOUT_SECONDS)
+        except FutureTimeoutError:
+            _LOGGER.warning(
+                "Timed out waiting for an MQTT message to be handled "
+                "(device_id=%s); continuing without blocking further "
+                "messages",
+                message.get("deviceId"),
+            )
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Error handling MQTT message")
 
     async def _async_handle_device_event(self, message: dict) -> None:
         """Apply a parsed MQTT message to the matching coordinator."""

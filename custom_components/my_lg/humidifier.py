@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from thinqconnect import ThinQAPIException
+from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.const import Property
 
 from homeassistant.components.humidifier import (
@@ -23,11 +23,10 @@ from homeassistant.components.humidifier import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_DEHUMIDIFIER
-from .coordinator_pat import PatDeviceCoordinator
+from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator], HumidifierEntity):
+class SmartThinqHybridDehumidifierEntity(PatCoordinatorEntity, HumidifierEntity):
     """Dehumidifier entity, fully driven by the official PAT API."""
 
     _attr_has_entity_name = True
@@ -74,6 +73,32 @@ class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator]
     def device(self):
         """Return the PAT device wrapper."""
         return self.coordinator.device
+
+    async def _async_send_pat_command(self, call, *, description: str) -> None:
+        """Send a PAT command, translating errors into HA exceptions.
+
+        NOT_CONNECTED_DEVICE marks the coordinator unreachable (which
+        immediately updates `available` for every entity backed by it)
+        and returns quietly rather than raising a visible error - the
+        device being briefly offline isn't something the user needs an
+        error popup for, it's reflected in the entity going unavailable.
+        Any other PAT error is surfaced as a ServiceValidationError.
+        """
+        try:
+            await call()
+        except ThinQAPIException as exc:
+            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                _LOGGER.debug(
+                    "Could not set %s for '%s': device is momentarily "
+                    "not connected to the cloud",
+                    description,
+                    self.coordinator.device.alias,
+                )
+                self.coordinator.mark_unreachable()
+                return
+            raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc
+        self.coordinator.mark_reachable()
+        await self.coordinator.async_request_refresh()
 
     @property
     def is_on(self) -> bool | None:
@@ -126,32 +151,28 @@ class SmartThinqHybridDehumidifierEntity(CoordinatorEntity[PatDeviceCoordinator]
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the dehumidifier on."""
-        try:
-            await self.device.set_dehumidifier_operation_mode("POWER_ON")
-        except ThinQAPIException as exc:
-            raise ServiceValidationError(f"제습기를 켤 수 없습니다: {exc}") from exc
-        await self.coordinator.async_request_refresh()
+        await self._async_send_pat_command(
+            lambda: self.device.set_dehumidifier_operation_mode("POWER_ON"),
+            description="전원",
+        )
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn the dehumidifier off."""
-        try:
-            await self.device.set_dehumidifier_operation_mode("POWER_OFF")
-        except ThinQAPIException as exc:
-            raise ServiceValidationError(f"제습기를 끌 수 없습니다: {exc}") from exc
-        await self.coordinator.async_request_refresh()
+        await self._async_send_pat_command(
+            lambda: self.device.set_dehumidifier_operation_mode("POWER_OFF"),
+            description="전원",
+        )
 
     async def async_set_mode(self, mode: str) -> None:
         """Set the dehumidifier's job mode."""
-        try:
-            await self.device.set_current_job_mode(mode)
-        except ThinQAPIException as exc:
-            raise ServiceValidationError(f"제습 모드를 변경할 수 없습니다: {exc}") from exc
-        await self.coordinator.async_request_refresh()
+        await self._async_send_pat_command(
+            lambda: self.device.set_current_job_mode(mode),
+            description="제습 모드",
+        )
 
     async def async_set_humidity(self, humidity: int) -> None:
         """Set the dehumidifier's target humidity."""
-        try:
-            await self.device.set_target_humidity(humidity)
-        except ThinQAPIException as exc:
-            raise ServiceValidationError(f"목표 습도를 변경할 수 없습니다: {exc}") from exc
-        await self.coordinator.async_request_refresh()
+        await self._async_send_pat_command(
+            lambda: self.device.set_target_humidity(humidity),
+            description="목표 습도",
+        )

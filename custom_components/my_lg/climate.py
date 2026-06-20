@@ -43,12 +43,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_AC
-from .coordinator_pat import PatDeviceCoordinator
+from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
 from .wideq.core_exceptions import APIError as WideqAPIError
+from .wideq.core_exceptions import NotConnectedError as WideqNotConnectedError
 from .wideq.devices.ac import AirConditionerFanSwingDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ async def async_setup_entry(
 
 
 class SmartThinqHybridClimateEntity(
-    CoordinatorEntity[PatDeviceCoordinator], RestoreEntity, ClimateEntity
+    PatCoordinatorEntity, RestoreEntity, ClimateEntity
 ):
     """Air conditioner climate entity (PAT power/mode + wideq temp/fan/swing)."""
 
@@ -264,6 +264,7 @@ class SmartThinqHybridClimateEntity(
                     "momentarily not connected to the cloud",
                     self.coordinator.device.alias,
                 )
+                self.coordinator.mark_unreachable()
                 return
             raise ServiceValidationError(
                 f"에어컨 모드를 변경할 수 없습니다: {exc}"
@@ -344,9 +345,25 @@ class SmartThinqHybridClimateEntity(
         `retry_call` is a zero-argument callable returning a fresh
         coroutine, since a coroutine object can only be awaited once and
         a retry needs to issue the command again from scratch.
+
+        A NotConnectedError (the device is offline) is handled separately
+        from other transient errors: retrying it is pointless since the
+        device being offline won't resolve itself in 0.6s, so this marks
+        the coordinator unreachable (updating `available` immediately)
+        and returns quietly instead of raising a visible error.
         """
         try:
             await retry_call()
+            self.coordinator.mark_reachable()
+            return
+        except WideqNotConnectedError:
+            _LOGGER.debug(
+                "Could not set %s for '%s': device is momentarily not "
+                "connected to the cloud",
+                description,
+                self.coordinator.device.alias,
+            )
+            self.coordinator.mark_unreachable()
             return
         except WideqAPIError as exc:
             if exc.code not in _WIDEQ_TRANSIENT_RESULT_CODES:
@@ -364,6 +381,9 @@ class SmartThinqHybridClimateEntity(
         await asyncio.sleep(_WIDEQ_RETRY_DELAY_SECONDS)
         try:
             await retry_call()
+            self.coordinator.mark_reachable()
+        except WideqNotConnectedError:
+            self.coordinator.mark_unreachable()
         except Exception as exc:  # pylint: disable=broad-except
             raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc
 

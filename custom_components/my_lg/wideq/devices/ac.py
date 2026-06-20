@@ -28,14 +28,6 @@ from ..device_info import DeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORT_RAC_SUBMODE = ["SupportRACSubMode", "support.racSubMode"]
-
-SUPPORT_VANE_HSWING = [
-    SUPPORT_RAC_SUBMODE,
-    "@AC_MAIN_WIND_DIRECTION_SWING_LEFT_RIGHT_W",
-]
-SUPPORT_VANE_VSWING = [SUPPORT_RAC_SUBMODE, "@AC_MAIN_WIND_DIRECTION_SWING_UP_DOWN_W"]
-
 CTRL_BASIC = ["Control", "basicCtrl"]
 CTRL_WIND_DIRECTION = ["Control", "wDirCtrl"]
 
@@ -44,19 +36,12 @@ SUPPORT_WIND_STRENGTH = ["SupportWindStrength", "support.airState.windStrength"]
 STATE_WIND_STRENGTH = ["WindStrength", "airState.windStrength"]
 STATE_WDIR_HSTEP = ["WDirHStep", "airState.wDir.hStep"]
 STATE_WDIR_VSTEP = ["WDirVStep", "airState.wDir.vStep"]
-STATE_WDIR_HSWING = ["WDirLeftRight", "airState.wDir.leftRight"]
-STATE_WDIR_VSWING = ["WDirUpDown", "airState.wDir.upDown"]
 STATE_TARGET_TEMP = ["TempCfg", "airState.tempState.target"]
 
 CMD_STATE_WIND_STRENGTH = [CTRL_BASIC, "Set", STATE_WIND_STRENGTH]
 CMD_STATE_WDIR_HSTEP = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_HSTEP]
 CMD_STATE_WDIR_VSTEP = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_VSTEP]
-CMD_STATE_WDIR_HSWING = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_HSWING]
-CMD_STATE_WDIR_VSWING = [CTRL_WIND_DIRECTION, "Set", STATE_WDIR_VSWING]
 CMD_STATE_TARGET_TEMP = [CTRL_BASIC, "Set", STATE_TARGET_TEMP]
-
-MODE_OFF = "@OFF"
-MODE_ON = "@ON"
 
 
 class ACFanSpeed(Enum):
@@ -147,17 +132,6 @@ class AirConditionerFanSwingDevice(Device):
     def __init__(self, client: ClientAsync, device_info: DeviceInfo) -> None:
         """Initialize the device."""
         super().__init__(client, device_info, status=None)
-
-    def _is_mode_supported(self, key) -> bool:
-        """Check if a specific mode for a support key is supported."""
-        if not isinstance(key, list):
-            return False
-        supp_key = self._get_state_key(key[0])
-        if isinstance(key[1], list):
-            return any(
-                self.model_info.enum_value(supp_key, k) is not None for k in key[1]
-            )
-        return self.model_info.enum_value(supp_key, key[1]) is not None
 
     @cached_property
     def fan_speeds(self) -> list[str]:
@@ -273,16 +247,6 @@ class AirConditionerFanSwingDevice(Device):
         step_mode = self.model_info.enum_value(keys[2], ACHStepMode[mode].value)
         await self.set(keys[0], keys[1], key=keys[2], value=step_mode)
 
-    async def horizontal_swing_mode(self, value: bool) -> None:
-        """Set the horizontal swing on or off."""
-        if not self._is_mode_supported(SUPPORT_VANE_HSWING):
-            raise ValueError("Horizontal swing mode not supported")
-        mode = MODE_ON if value else MODE_OFF
-        keys = self._get_cmd_keys(CMD_STATE_WDIR_HSWING)
-        if (swing_mode := self.model_info.enum_value(keys[2], mode)) is None:
-            raise ValueError(f"Invalid horizontal swing mode: {mode}")
-        await self.set(keys[0], keys[1], key=keys[2], value=swing_mode)
-
     async def set_vertical_step_mode(self, mode: str) -> None:
         """Set the vertical step to a value from the `ACVStepMode` enum."""
         if mode not in self.vertical_step_modes:
@@ -290,13 +254,3 @@ class AirConditionerFanSwingDevice(Device):
         keys = self._get_cmd_keys(CMD_STATE_WDIR_VSTEP)
         step_mode = self.model_info.enum_value(keys[2], ACVStepMode[mode].value)
         await self.set(keys[0], keys[1], key=keys[2], value=step_mode)
-
-    async def vertical_swing_mode(self, value: bool) -> None:
-        """Set the vertical swing on or off."""
-        if not self._is_mode_supported(SUPPORT_VANE_VSWING):
-            raise ValueError("Vertical swing mode not supported")
-        mode = MODE_ON if value else MODE_OFF
-        keys = self._get_cmd_keys(CMD_STATE_WDIR_VSWING)
-        if (swing_mode := self.model_info.enum_value(keys[2], mode)) is None:
-            raise ValueError(f"Invalid vertical swing mode: {mode}")
-        await self.set(keys[0], keys[1], key=keys[2], value=swing_mode)

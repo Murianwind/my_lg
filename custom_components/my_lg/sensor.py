@@ -248,16 +248,22 @@ class AcFilterRemainSensor(PatCoordinatorEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Return whether this sensor's current data source is available.
+        """Return whether this sensor currently has a value to show.
 
-        With a wideq filter_coordinator, that coordinator's own success
-        state is what matters (the PAT coordinator backing `self.coordinator`
-        may be perfectly healthy while the separate wideq filter poll is
-        failing, or vice versa). Without one, falls back to the PAT
-        coordinator's availability, like other PAT-only sensors.
+        Deliberately NOT `self._filter_coordinator.last_update_success`:
+        that flips to False the moment a single wideq poll fails (the
+        wideq filter query is comparatively flaky), which would mark the
+        sensor unavailable even though `native_value` below still has the
+        last successfully fetched value to show (DataUpdateCoordinator
+        does not clear `.data` on a failed update - see
+        `_async_update_data`'s docstring). So: available as long as there
+        is a value to display at all, regardless of whether the most
+        recent poll succeeded. Only goes unavailable if no value has ever
+        been fetched (e.g. the very first poll, on integration startup,
+        failed) - in that case there genuinely is nothing to show yet.
         """
         if self._filter_coordinator is not None:
-            return self._filter_coordinator.last_update_success
+            return self._filter_coordinator.data is not None
         return super().available
 
     @property

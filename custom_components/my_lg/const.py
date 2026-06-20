@@ -16,14 +16,6 @@ CONF_PAT_ACCESS_TOKEN = "pat_access_token"
 CONF_PAT_CLIENT_ID = "pat_client_id"
 CONF_PAT_COUNTRY = "pat_country"
 
-# --- Runtime data keys ---
-DATA_WIDEQ_CLIENT = "wideq_client"
-DATA_PAT_API = "pat_api"
-DATA_DEVICE_PAIRS = "device_pairs"
-
-# --- Platforms ---
-PLATFORMS = ["climate", "humidifier", "sensor", "switch"]
-
 # --- Defaults ---
 DEFAULT_COUNTRY = "KR"
 DEFAULT_LANGUAGE = "ko-KR"

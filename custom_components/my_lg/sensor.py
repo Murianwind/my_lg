@@ -369,13 +369,31 @@ class WasherRemainTimeSensor(PatCoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        """Return the estimated completion time as an absolute timestamp."""
+        """Return the estimated completion time as an absolute timestamp.
+
+        REMAIN_HOUR / REMAIN_MINUTE can come back as an empty string or
+        other non-numeric value when the device's state is momentarily
+        inconsistent (e.g. just after power-off, during a connectivity
+        blip), even though they aren't None - int() on a value like ""
+        raises ValueError, which would otherwise crash this property and
+        fail the whole sensor update. Treat any non-numeric value the
+        same as a missing one.
+        """
         from datetime import datetime, timedelta, timezone
         hour = self.coordinator.get_status(Property.REMAIN_HOUR)
         minute = self.coordinator.get_status(Property.REMAIN_MINUTE)
         if hour is None or minute is None:
             return None
-        total_minutes = int(hour) * 60 + int(minute)
+        try:
+            total_minutes = int(hour) * 60 + int(minute)
+        except (TypeError, ValueError):
+            _LOGGER.debug(
+                "Ignoring non-numeric remaining time for '%s': hour=%r, minute=%r",
+                self.coordinator.device.alias,
+                hour,
+                minute,
+            )
+            return None
         if total_minutes == 0:
             return None
         return datetime.now(timezone.utc) + timedelta(minutes=total_minutes)

@@ -21,7 +21,7 @@ from homeassistant.helpers.update_coordinator import (
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_AC, PAT_DEVICE_TYPE_WASHER
 from .coordinator_course import WasherCourseCoordinator
-from .coordinator_pat import PatDeviceCoordinator
+from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
 from .device_router import match_wideq_to_pat
 from .wideq import DeviceType as WideqDeviceType
 from .wideq.devices.ac import AirConditionerFanSwingDevice
@@ -214,7 +214,7 @@ async def _async_build_washer_course_sensor(
     return WasherCourseSensor(course_coordinator, pat_coordinator)
 
 
-class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
+class AcFilterRemainSensor(PatCoordinatorEntity, SensorEntity):
     """Air conditioner filter remaining life sensor.
 
     Reads from wideq (AcFilterCoordinator) when available — the official
@@ -245,6 +245,20 @@ class AcFilterRemainSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
             self.async_on_remove(
                 filter_coordinator.async_add_listener(self.async_write_ha_state)
             )
+
+    @property
+    def available(self) -> bool:
+        """Return whether this sensor's current data source is available.
+
+        With a wideq filter_coordinator, that coordinator's own success
+        state is what matters (the PAT coordinator backing `self.coordinator`
+        may be perfectly healthy while the separate wideq filter poll is
+        failing, or vice versa). Without one, falls back to the PAT
+        coordinator's availability, like other PAT-only sensors.
+        """
+        if self._filter_coordinator is not None:
+            return self._filter_coordinator.last_update_success
+        return super().available
 
     @property
     def native_value(self):
@@ -299,7 +313,7 @@ _RUN_STATE_OPTIONS = [
 ]
 
 
-class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
+class WasherRunStateSensor(PatCoordinatorEntity, SensorEntity):
     """Washer run state sensor (PAT).
 
     The PAT API's `runState.currentState` enum values are returned in
@@ -332,7 +346,7 @@ class WasherRunStateSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity
         return state.lower()
 
 
-class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
+class WasherRemainTimeSensor(PatCoordinatorEntity, SensorEntity):
     """Washer remaining time sensor (PAT).
 
     Converts the PAT API's remain_hour / remain_minute values into an
@@ -367,7 +381,7 @@ class WasherRemainTimeSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEnti
         return datetime.now(timezone.utc) + timedelta(minutes=total_minutes)
 
 
-class WasherCycleCountSensor(CoordinatorEntity[PatDeviceCoordinator], SensorEntity):
+class WasherCycleCountSensor(PatCoordinatorEntity, SensorEntity):
     """Washer cycle count sensor (PAT)."""
 
     _attr_has_entity_name = True

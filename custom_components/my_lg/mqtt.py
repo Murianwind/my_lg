@@ -33,7 +33,9 @@ from .coordinator_pat import PatDeviceCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 _PUSH_TYPE_DEVICE_STATUS = "DEVICE_STATUS"
-_PUSH_TYPE_DEVICE_PUSH = "DEVICE_PUSH"
+# Other pushType values exist (e.g. "DEVICE_PUSH" for notifications like
+# "wash cycle finished") but are not currently mapped to anything in this
+# integration's entities, so only DEVICE_STATUS is matched below.
 
 
 class ThinQMQTT:
@@ -198,6 +200,3 @@ class ThinQMQTT:
 
         if push_type == _PUSH_TYPE_DEVICE_STATUS:
             coordinator.handle_mqtt_status(message.get("report", {}))
-        # Other push types (e.g. DEVICE_PUSH notifications) are not currently
-        # mapped to anything in this integration's entities, so they are
-        # intentionally ignored here.

@@ -88,6 +88,7 @@ class WasherCourseCoordinator(DataUpdateCoordinator[str]):
         elif not is_running and self._is_polling_active:
             self._is_polling_active = False
             self.update_interval = None
+            self.async_set_updated_data("-")
 
     async def _async_update_data(self) -> str:
         """Fetch the current course from wideq, decoding a fresh snapshot."""

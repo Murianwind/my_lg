@@ -53,6 +53,7 @@ from .const import (
     CONF_WIDEQ_REFRESH_TOKEN,
     MQTT_SUBSCRIPTION_REFRESH_INTERVAL_SECONDS,
     PAT_UPDATE_INTERVAL_SECONDS,
+    WIDEQ_AUTH_REFRESH_INTERVAL_SECONDS,
 )
 from .coordinator_pat import (
     PatDeviceCoordinator,
@@ -208,6 +209,32 @@ async def async_setup_entry(
                 "REST polling only: %s",
                 exc,
             )
+
+    # --- 3.6. Schedule periodic wideq session refresh ---
+    # The wideq (ThinQ Web login) access token expires after ~1 hour
+    # (DEFAULT_TOKEN_VALIDITY = 3600s in core_async.py). Without
+    # proactive renewal, the token silently expires and the next wideq
+    # command (fan speed, swing, temperature) fails with
+    # NotLoggedInError (0102) until the integration is reloaded.
+    # Auth.refresh() is already idempotent: it skips the actual HTTP
+    # call when the token is still valid, so calling it hourly is safe
+    # regardless of the actual token validity returned by LG's server.
+    async def _async_refresh_wideq_auth(now: datetime | None = None) -> None:
+        """Refresh the wideq access token on schedule."""
+        try:
+            await wideq_client.refresh_auth()
+            _LOGGER.debug("wideq session refreshed successfully")
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.warning("Failed to refresh wideq session: %s", exc)
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            _async_refresh_wideq_auth,
+            timedelta(seconds=WIDEQ_AUTH_REFRESH_INTERVAL_SECONDS),
+            cancel_on_shutdown=True,
+        )
+    )
 
     # --- 4. Match wideq AC devices to their PAT counterpart for fan/swing ---
     if wideq_client.devices:

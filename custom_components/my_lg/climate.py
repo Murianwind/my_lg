@@ -47,8 +47,10 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_AC
 from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
+from .wideq.core_async import ClientAsync
 from .wideq.core_exceptions import APIError as WideqAPIError
 from .wideq.core_exceptions import NotConnectedError as WideqNotConnectedError
+from .wideq.core_exceptions import NotLoggedInError as WideqNotLoggedInError
 from .wideq.devices.ac import AirConditionerFanSwingDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,7 +99,9 @@ async def async_setup_entry(
             continue
         fan_swing_device = runtime_data.ac_fan_swing_devices.get(device_id)
         entities.append(
-            SmartThinqHybridClimateEntity(coordinator, fan_swing_device)
+            SmartThinqHybridClimateEntity(
+                coordinator, fan_swing_device, runtime_data.wideq_client
+            )
         )
     async_add_entities(entities)
 
@@ -118,10 +122,12 @@ class SmartThinqHybridClimateEntity(
         self,
         coordinator: PatDeviceCoordinator,
         fan_swing_device: AirConditionerFanSwingDevice | None,
+        wideq_client: ClientAsync,
     ) -> None:
         """Initialize the climate entity."""
         super().__init__(coordinator)
         self._fan_swing_device = fan_swing_device
+        self._wideq_client = wideq_client
         self._attr_unique_id = f"{coordinator.device.device_id}-climate"
         self._attr_device_info = coordinator.device_info
         self._attr_suggested_object_id = "aircon"
@@ -351,6 +357,14 @@ class SmartThinqHybridClimateEntity(
         device being offline won't resolve itself in 0.6s, so this marks
         the coordinator unreachable (updating `available` immediately)
         and returns quietly instead of raising a visible error.
+
+        A NotLoggedInError (0102) means the wideq session (ThinQ Web
+        access token) has expired. Auth.refresh() is called immediately
+        to renew the session, then the command is retried once. This
+        complements the hourly proactive refresh scheduled in __init__.py
+        (which prevents most expiry-at-command-time cases) but acts as a
+        safety net for the rare case where the token expires between
+        scheduled refreshes.
         """
         try:
             await retry_call()
@@ -365,6 +379,27 @@ class SmartThinqHybridClimateEntity(
             )
             self.coordinator.mark_unreachable()
             return
+        except WideqNotLoggedInError:
+            _LOGGER.debug(
+                "wideq session expired while setting %s for '%s'; "
+                "refreshing auth and retrying once",
+                description,
+                self.coordinator.device.alias,
+            )
+            try:
+                await self._wideq_client.refresh_auth()
+            except Exception as exc:  # pylint: disable=broad-except
+                raise ServiceValidationError(
+                    f"{description}을(를) 변경할 수 없습니다: wideq 세션 갱신 실패: {exc}"
+                ) from exc
+            try:
+                await retry_call()
+                self.coordinator.mark_reachable()
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                raise ServiceValidationError(
+                    f"{description}을(를) 변경할 수 없습니다: {exc}"
+                ) from exc
         except WideqAPIError as exc:
             if exc.code not in _WIDEQ_TRANSIENT_RESULT_CODES:
                 raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc

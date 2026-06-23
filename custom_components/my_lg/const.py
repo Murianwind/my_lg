@@ -42,6 +42,13 @@ WASHER_COURSE_UPDATE_INTERVAL_SECONDS = 300
 # (MQTT_SUBSCRIPTION_INTERVAL = timedelta(days=1)).
 MQTT_SUBSCRIPTION_REFRESH_INTERVAL_SECONDS = 86400
 
+# How often to proactively refresh the wideq (ThinQ Web login) access token.
+# The default token validity is 3600s (see core_async.DEFAULT_TOKEN_VALIDITY),
+# so refreshing once an hour keeps the session alive without excessive API calls.
+# Auth.refresh() is idempotent: if the token is still valid it returns immediately
+# without making any HTTP request, so this interval is safe to call blindly.
+WIDEQ_AUTH_REFRESH_INTERVAL_SECONDS = 3600
+
 # PAT device type strings (as returned by GET /devices)
 PAT_DEVICE_TYPE_AC = "DEVICE_AIR_CONDITIONER"
 PAT_DEVICE_TYPE_DEHUMIDIFIER = "DEVICE_DEHUMIDIFIER"

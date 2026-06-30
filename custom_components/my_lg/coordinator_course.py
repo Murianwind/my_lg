@@ -13,13 +13,18 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import WASHER_COURSE_UPDATE_INTERVAL_SECONDS, WASHER_INACTIVE_STATES
 from .coordinator_pat import PatDeviceCoordinator
+from .wideq.core_exceptions import InvalidCredentialError as WideqInvalidCredentialError
 from .wideq.devices.washerDryer import WMDevice
+
+if TYPE_CHECKING:
+    from . import SmartThinqHybridRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +51,7 @@ class WasherCourseCoordinator(DataUpdateCoordinator[str]):
         wideq_device: WMDevice,
         pat_washer_coordinator: PatDeviceCoordinator,
         pat_run_state_getter,
+        runtime_data: "SmartThinqHybridRuntimeData",
     ) -> None:
         """Initialize the coordinator.
 
@@ -63,6 +69,7 @@ class WasherCourseCoordinator(DataUpdateCoordinator[str]):
         self._wideq_device = wideq_device
         self._pat_washer_coordinator = pat_washer_coordinator
         self._pat_run_state_getter = pat_run_state_getter
+        self._runtime_data = runtime_data
         self._is_polling_active = False
 
         # Keep the unsubscribe callback so the caller (sensor.py) can wire
@@ -91,13 +98,30 @@ class WasherCourseCoordinator(DataUpdateCoordinator[str]):
             self.async_set_updated_data("-")
 
     async def _async_update_data(self) -> str:
-        """Fetch the current course from wideq, decoding a fresh snapshot."""
+        """Fetch the current course from wideq, decoding a fresh snapshot.
+
+        Skips the call entirely if `runtime_data.wideq_reauth_needed` is
+        already set: see the matching guard in climate.py's
+        _async_send_wideq_command for why repeatedly calling a session LG
+        has shut down for ToS reasons is pointless.
+        """
+        if self._runtime_data.wideq_reauth_needed:
+            raise UpdateFailed(
+                f"wideq course update skipped for {self._wideq_device.name}: "
+                "reauth needed (see binary_sensor.*_wideq_reauth_needed)"
+            )
         try:
             status = await self._wideq_device.poll()
+        except WideqInvalidCredentialError as exc:
+            self._runtime_data.mark_wideq_reauth_needed()
+            raise UpdateFailed(
+                f"wideq course update for {self._wideq_device.name}: reauth needed"
+            ) from exc
         except Exception as exc:  # pylint: disable=broad-except
             raise UpdateFailed(
                 f"wideq course update failed for {self._wideq_device.name}: {exc}"
             ) from exc
+        self._runtime_data.mark_wideq_reauth_ok()
         if status is None:
             raise UpdateFailed(
                 f"wideq course update returned no data for {self._wideq_device.name}"

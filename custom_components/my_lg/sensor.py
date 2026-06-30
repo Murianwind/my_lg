@@ -51,7 +51,7 @@ async def async_setup_entry(
                     "AC '%s': matched wideq device for filter polling",
                     coordinator.device.alias,
                 )
-                filter_coordinator = AcFilterCoordinator(hass, entry, wideq_ac)
+                filter_coordinator = AcFilterCoordinator(hass, entry, wideq_ac, runtime_data)
                 try:
                     await filter_coordinator.async_config_entry_first_refresh()
                     _LOGGER.debug(
@@ -108,6 +108,7 @@ class AcFilterCoordinator(DataUpdateCoordinator[dict | None]):
         hass: HomeAssistant,
         config_entry,
         wideq_device: AirConditionerFanSwingDevice,
+        runtime_data,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -118,6 +119,7 @@ class AcFilterCoordinator(DataUpdateCoordinator[dict | None]):
             update_interval=_FILTER_UPDATE_INTERVAL,
         )
         self._wideq_device = wideq_device
+        self._runtime_data = runtime_data
 
     async def _async_update_data(self) -> dict:
         """Fetch filter info from wideq.
@@ -125,11 +127,25 @@ class AcFilterCoordinator(DataUpdateCoordinator[dict | None]):
         Raises UpdateFailed (rather than returning None) when the data is
         unavailable, so Home Assistant keeps the last known good value
         instead of resetting the sensor to unknown on a transient failure.
+
+        Skips the call entirely if `runtime_data.wideq_reauth_needed` is
+        already set; see the matching guard in climate.py.
         """
+        if self._runtime_data.wideq_reauth_needed:
+            raise UpdateFailed(
+                f"wideq filter update skipped for {self._wideq_device.device_info.name}: "
+                "reauth needed (see binary_sensor.*_wideq_reauth_needed)"
+            )
         try:
             info = await self._wideq_device.async_get_filter_info()
+        except WideqInvalidCredentialError as exc:
+            self._runtime_data.mark_wideq_reauth_needed()
+            raise UpdateFailed(
+                f"wideq filter update for {self._wideq_device.device_info.name}: reauth needed"
+            ) from exc
         except Exception as exc:  # pylint: disable=broad-except
             raise UpdateFailed(f"wideq 필터 정보 조회 실패: {exc}") from exc
+        self._runtime_data.mark_wideq_reauth_ok()
         if info is None:
             raise UpdateFailed("wideq 필터 정보를 가져오지 못했습니다")
         return info
@@ -207,7 +223,7 @@ async def _async_build_washer_course_sensor(
 
     entry = pat_coordinator.config_entry
     course_coordinator = WasherCourseCoordinator(
-        hass, entry, wideq_device, pat_coordinator, _get_pat_run_state
+        hass, entry, wideq_device, pat_coordinator, _get_pat_run_state, runtime_data
     )
     if entry is not None:
         entry.async_on_unload(course_coordinator.unsub_pat_listener)

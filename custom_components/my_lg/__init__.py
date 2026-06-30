@@ -30,6 +30,7 @@ see config_flow.py.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 import logging
 
@@ -68,7 +69,13 @@ from .wideq.devices.ac import AirConditionerFanSwingDevice
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CLIMATE, Platform.HUMIDIFIER, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.CLIMATE,
+    Platform.HUMIDIFIER,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 
 class SmartThinqHybridRuntimeData:
@@ -94,6 +101,74 @@ class SmartThinqHybridRuntimeData:
         # in that case, PatDeviceCoordinator's REST fallback polling is
         # the only source of updates.
         self.mqtt_client: ThinQMQTT | None = None
+        # True once a wideq call has failed with InvalidCredentialError
+        # (LG response code "0110"). LG's server returns this same code
+        # both for genuinely wrong credentials and for "you must accept
+        # updated Terms of Service in the ThinQ mobile app" - there is no
+        # way to tell them apart from the API response alone. Since a
+        # wrong password would already have been caught during initial
+        # setup (config_flow.py), a previously-working integration
+        # suddenly hitting this is almost always the ToS case. While this
+        # is True, all further wideq calls are skipped (see
+        # wideq_reauth_needed_guard below) rather than repeatedly failing
+        # against a session LG has already shut down; mark_wideq_reauth_ok
+        # clears it once a wideq call succeeds again (e.g. after the user
+        # has accepted the new terms in the app and reloaded the
+        # integration).
+        self.wideq_reauth_needed: bool = False
+        self._wideq_reauth_listeners: list[Callable[[], None]] = []
+
+    def add_wideq_reauth_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Register a callback invoked whenever wideq_reauth_needed changes.
+
+        Returns an unsubscribe function, following Home Assistant's usual
+        listener-registration convention (intended for `self.async_on_remove`).
+        """
+        self._wideq_reauth_listeners.append(listener)
+
+        def _remove() -> None:
+            self._wideq_reauth_listeners.remove(listener)
+
+        return _remove
+
+    def mark_wideq_reauth_needed(self) -> None:
+        """Record that wideq has hit InvalidCredentialError and notify listeners.
+
+        Deliberately no warning/error-level log here: the resulting
+        `binary_sensor.*_wideq_reauth_needed` turning on is the intended
+        signal for this, since it's something automations and the user
+        can act on directly, unlike a log line. A debug line is kept so
+        the transition is still visible when actively troubleshooting
+        with debug logging enabled.
+        """
+        if self.wideq_reauth_needed:
+            return
+        _LOGGER.debug(
+            "wideq marked as needing reauth (InvalidCredentialError); "
+            "further wideq calls will be skipped until the integration "
+            "is reloaded"
+        )
+        self.wideq_reauth_needed = True
+        for listener in list(self._wideq_reauth_listeners):
+            listener()
+
+    def mark_wideq_reauth_ok(self) -> None:
+        """Clear the reauth-needed flag after a wideq call succeeds again.
+
+        In practice this mainly fires right after the user reloads the
+        integration following ToS acceptance, since the guard in
+        climate.py/coordinator_course.py/sensor.py skips wideq calls
+        entirely while wideq_reauth_needed is True - but reloading the
+        config entry also recreates this whole object with the flag
+        already False, so this method exists mainly as a safety net for
+        any code path that doesn't go through that guard.
+        """
+        if not self.wideq_reauth_needed:
+            return
+        _LOGGER.debug("wideq session is working again")
+        self.wideq_reauth_needed = False
+        for listener in list(self._wideq_reauth_listeners):
+            listener()
 
 
 type SmartThinqHybridConfigEntry = ConfigEntry[SmartThinqHybridRuntimeData]

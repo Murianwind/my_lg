@@ -44,11 +44,11 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from . import SmartThinqHybridConfigEntry
+from . import SmartThinqHybridConfigEntry, SmartThinqHybridRuntimeData
 from .const import PAT_DEVICE_TYPE_AC
 from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
-from .wideq.core_async import ClientAsync
 from .wideq.core_exceptions import APIError as WideqAPIError
+from .wideq.core_exceptions import InvalidCredentialError as WideqInvalidCredentialError
 from .wideq.core_exceptions import NotConnectedError as WideqNotConnectedError
 from .wideq.core_exceptions import NotLoggedInError as WideqNotLoggedInError
 from .wideq.devices.ac import AirConditionerFanSwingDevice
@@ -99,9 +99,7 @@ async def async_setup_entry(
             continue
         fan_swing_device = runtime_data.ac_fan_swing_devices.get(device_id)
         entities.append(
-            SmartThinqHybridClimateEntity(
-                coordinator, fan_swing_device, runtime_data.wideq_client
-            )
+            SmartThinqHybridClimateEntity(coordinator, fan_swing_device, runtime_data)
         )
     async_add_entities(entities)
 
@@ -122,12 +120,13 @@ class SmartThinqHybridClimateEntity(
         self,
         coordinator: PatDeviceCoordinator,
         fan_swing_device: AirConditionerFanSwingDevice | None,
-        wideq_client: ClientAsync,
+        runtime_data: SmartThinqHybridRuntimeData,
     ) -> None:
         """Initialize the climate entity."""
         super().__init__(coordinator)
         self._fan_swing_device = fan_swing_device
-        self._wideq_client = wideq_client
+        self._runtime_data = runtime_data
+        self._wideq_client = runtime_data.wideq_client
         self._attr_unique_id = f"{coordinator.device.device_id}-climate"
         self._attr_device_info = coordinator.device_info
         self._attr_suggested_object_id = "aircon"
@@ -352,6 +351,13 @@ class SmartThinqHybridClimateEntity(
         coroutine, since a coroutine object can only be awaited once and
         a retry needs to issue the command again from scratch.
 
+        If `runtime_data.wideq_reauth_needed` is already set (see
+        InvalidCredentialError handling below), this returns immediately
+        without attempting the call at all: a session LG has shut down
+        for ToS reasons won't start working again until the user accepts
+        the new terms in the mobile app, so repeatedly calling it just
+        adds noise and unnecessary API traffic.
+
         A NotConnectedError (the device is offline) is handled separately
         from other transient errors: retrying it is pointless since the
         device being offline won't resolve itself in 0.6s, so this marks
@@ -365,10 +371,32 @@ class SmartThinqHybridClimateEntity(
         (which prevents most expiry-at-command-time cases) but acts as a
         safety net for the rare case where the token expires between
         scheduled refreshes.
+
+        An InvalidCredentialError (0110) is treated as distinct from both
+        of the above: LG returns this same code both for genuinely wrong
+        credentials and for "you must accept updated Terms of Service in
+        the ThinQ app" - see the docstring on
+        runtime_data.wideq_reauth_needed for why a previously-working
+        integration hitting this is almost always the ToS case. Retrying
+        is pointless either way, so this marks reauth as needed (which
+        also surfaces `binary_sensor.*_wideq_reauth_needed`) and returns
+        quietly instead of raising a visible error on every command.
         """
+        if self._runtime_data.wideq_reauth_needed:
+            _LOGGER.debug(
+                "Skipping %s for '%s': wideq reauth is needed (see "
+                "binary_sensor.*_wideq_reauth_needed)",
+                description,
+                self.coordinator.device.alias,
+            )
+            return
         try:
             await retry_call()
             self.coordinator.mark_reachable()
+            self._runtime_data.mark_wideq_reauth_ok()
+            return
+        except WideqInvalidCredentialError:
+            self._runtime_data.mark_wideq_reauth_needed()
             return
         except WideqNotConnectedError:
             _LOGGER.debug(
@@ -396,6 +424,9 @@ class SmartThinqHybridClimateEntity(
                 await retry_call()
                 self.coordinator.mark_reachable()
                 return
+            except WideqInvalidCredentialError:
+                self._runtime_data.mark_wideq_reauth_needed()
+                return
             except Exception as exc:  # pylint: disable=broad-except
                 raise ServiceValidationError(
                     f"{description}을(를) 변경할 수 없습니다: {exc}"
@@ -417,6 +448,9 @@ class SmartThinqHybridClimateEntity(
         try:
             await retry_call()
             self.coordinator.mark_reachable()
+            self._runtime_data.mark_wideq_reauth_ok()
+        except WideqInvalidCredentialError:
+            self._runtime_data.mark_wideq_reauth_needed()
         except WideqNotConnectedError:
             self.coordinator.mark_unreachable()
         except Exception as exc:  # pylint: disable=broad-except

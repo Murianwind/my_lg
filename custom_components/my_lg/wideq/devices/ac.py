@@ -23,6 +23,7 @@ from enum import Enum
 
 from ..backports.functools import cached_property
 from ..core_async import ClientAsync
+from ..core_exceptions import InvalidCredentialError as WideqInvalidCredentialError
 from ..device import Device
 from ..device_info import DeviceInfo
 
@@ -160,6 +161,8 @@ class AirConditionerFanSwingDevice(Device):
         """
         try:
             data = await self._get_config(self._FILTER_CONFIG_KEY_V1)
+        except WideqInvalidCredentialError:
+            raise
         except Exception as exc:  # pylint: disable=broad-except
             _LOGGER.debug("Filter V1 query raised for '%s': %s", self.device_info.name, exc)
             data = None
@@ -169,6 +172,8 @@ class AirConditionerFanSwingDevice(Device):
 
         try:
             data = await self._get_config_v2(self._FILTER_CONFIG_KEY_V2, "Get")
+        except WideqInvalidCredentialError:
+            raise
         except Exception as exc:  # pylint: disable=broad-except
             _LOGGER.debug("Filter V2 query raised for '%s': %s", self.device_info.name, exc)
             data = None

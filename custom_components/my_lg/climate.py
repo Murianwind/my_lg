@@ -3,26 +3,34 @@
 Power and hvac mode are driven by the official PAT API (via the
 PatDeviceCoordinator), since that part of the API is reliable and not
 subject to the rate limiting/blocking the unofficial endpoint suffers
-from. Target temperature, fan speed, and vane position/swing are all
-driven by wideq instead:
+from. Target temperature, fan speed, and vane position/swing are
+primarily driven by wideq:
 
 * Fan speed and vane stepping are not exposed by the official API at
   all (it only offers a coarse 4-level fan speed and a simple up/down
-  on-off flag), so wideq is the only option.
+  on-off flag), so wideq is the only option - if wideq is unavailable
+  (e.g. ToS not accepted, see __init__.py), fan/swing control is simply
+  not offered for this entity (ClimateEntityFeature.FAN_MODE/SWING_MODE
+  are left out of supported_features).
 * Target temperature IS exposed by PAT, but PAT's coolTargetTemperature/
   heatTargetTemperature step is fixed per device model - on this user's
   unit it is 1 whole degree, and sending a 0.5-step value is rejected by
   the PAT server with INVALID_COMMAND_ERROR (2207). wideq's
   airState.tempState.target key accepts half-degree values directly
-  (matching what the LG ThinQ mobile app itself sends), so it is used
-  here instead to allow 0.5-degree control.
+  (matching what the LG ThinQ mobile app itself sends), so it is
+  preferred when available for 0.5-degree control. When wideq is
+  unavailable, temperature control falls back to PAT at 1-degree
+  granularity instead of being disabled entirely - losing half-degree
+  precision is a much smaller problem than not being able to set the
+  temperature at all.
 
-wideq is used purely as a write-only command channel for all three: no
-polling happens against it, current_temperature still comes from PAT
-(it is read-only there and unaffected by the above issue). Since there
-is no read-back for fan_mode/swing_mode/target_temperature, this entity
-is also a RestoreEntity: the last commanded values are persisted across
-Home Assistant restarts instead of resetting to nothing every time.
+wideq is used purely as a write-only command channel for temp/fan/swing:
+no polling happens against it, current_temperature always comes from PAT
+(it is read-only there and unaffected by the step-size issue above).
+Since there is no read-back for fan_mode/swing_mode/target_temperature
+when driven by wideq, this entity is also a RestoreEntity: the last
+commanded values are persisted across Home Assistant restarts instead of
+resetting to nothing every time.
 """
 
 from __future__ import annotations
@@ -114,7 +122,8 @@ class SmartThinqHybridClimateEntity(
     _attr_translation_key = "aircon"
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.FAN_ONLY]
     _attr_temperature_unit = "°C"
-    _attr_target_temperature_step = _TARGET_TEMPERATURE_STEP
+    # _attr_target_temperature_step is set per-instance in __init__ (0.5
+    # with wideq, 1.0 without - see the fallback logic there).
 
     def __init__(
         self,
@@ -149,6 +158,13 @@ class SmartThinqHybridClimateEntity(
         # pending send and replace it with a new one, so only the final
         # value is actually sent to wideq.
         self._pending_temperature_task: asyncio.Task | None = None
+
+        # 0.5-degree steps require wideq (see module docstring); fall back
+        # to PAT's 1-degree granularity when wideq/fan_swing_device isn't
+        # available, rather than disabling temperature control entirely.
+        self._attr_target_temperature_step = (
+            _TARGET_TEMPERATURE_STEP if fan_swing_device is not None else 1.0
+        )
 
         if fan_swing_device is not None:
             if fan_swing_device.fan_speeds:
@@ -277,20 +293,28 @@ class SmartThinqHybridClimateEntity(
         await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs) -> None:
-        """Set the target temperature via wideq (write-only, no polling).
+        """Set the target temperature.
 
-        Silently ignored in FAN_ONLY mode: the device does not have a
-        temperature concept while blowing air only.
+        Prefers wideq for 0.5-degree precision (write-only, no polling);
+        falls back to the official PAT API at 1-degree granularity when
+        wideq/fan_swing_device is unavailable (see module docstring) -
+        losing half-degree precision is far less disruptive than being
+        unable to set the temperature at all.
 
-        The UI-facing state updates immediately (optimistic), but the
-        actual command to wideq is debounced: if this is called again
-        within _WIDEQ_COMMAND_DEBOUNCE_SECONDS (e.g. a slider being
-        dragged, or an automation re-triggering quickly), the previous
-        pending send is cancelled and only the latest value is actually
-        sent. This avoids firing near-simultaneous commands at wideq,
-        which has been observed to reject one of them with a transient
-        result code (e.g. "0103") when two commands for the same device
-        arrive within a few hundred milliseconds of each other.
+        Silently ignored in FAN_ONLY mode either way: the device does not
+        have a temperature concept while blowing air only.
+
+        When using wideq, the UI-facing state updates immediately
+        (optimistic), but the actual command is debounced: if this is
+        called again within _WIDEQ_COMMAND_DEBOUNCE_SECONDS (e.g. a
+        slider being dragged, or an automation re-triggering quickly),
+        the previous pending send is cancelled and only the latest value
+        is actually sent. This avoids firing near-simultaneous commands
+        at wideq, which has been observed to reject one of them with a
+        transient result code (e.g. "0103") when two commands for the
+        same device arrive within a few hundred milliseconds of each
+        other. The PAT fallback path has no such issue (PAT tolerates
+        rapid successive calls) so it is sent directly, without debounce.
         """
         temperature = kwargs.get("temperature")
         if temperature is None:
@@ -306,10 +330,10 @@ class SmartThinqHybridClimateEntity(
                 temperature,
             )
             return
+
         if self._fan_swing_device is None:
-            raise ServiceValidationError(
-                "이 에어컨은 온도 제어를 위한 wideq 연동이 설정되어 있지 않습니다."
-            )
+            await self._async_set_temperature_via_pat(temperature, hvac_mode)
+            return
 
         self._last_target_temperature = temperature
         self.async_write_ha_state()
@@ -319,6 +343,37 @@ class SmartThinqHybridClimateEntity(
         self._pending_temperature_task = self.hass.async_create_task(
             self._async_debounced_set_temperature(temperature)
         )
+
+    async def _async_set_temperature_via_pat(
+        self, temperature: float, hvac_mode: HVACMode | None
+    ) -> None:
+        """Set the target temperature via PAT (1-degree granularity fallback).
+
+        Used when wideq is unavailable. PAT rejects a 0.5-step value with
+        INVALID_COMMAND_ERROR (2207) on this user's unit, so the value is
+        rounded to the nearest whole degree first - still functional,
+        just less precise than wideq's 0.5-degree steps.
+        """
+        rounded_temperature = round(temperature)
+        try:
+            if hvac_mode == HVACMode.HEAT:
+                await self.device.set_heat_target_temperature_c(rounded_temperature)
+            else:
+                await self.device.set_cool_target_temperature_c(rounded_temperature)
+        except ThinQAPIException as exc:
+            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                _LOGGER.debug(
+                    "Could not set temperature for '%s': device is "
+                    "momentarily not connected to the cloud",
+                    self.coordinator.device.alias,
+                )
+                self.coordinator.mark_unreachable()
+                return
+            raise ServiceValidationError(
+                f"목표 온도를 변경할 수 없습니다: {exc}"
+            ) from exc
+        self.coordinator.mark_reachable()
+        await self.coordinator.async_request_refresh()
 
     async def _async_debounced_set_temperature(self, temperature: float) -> None:
         """Wait out the debounce window, then send the temperature to wideq.

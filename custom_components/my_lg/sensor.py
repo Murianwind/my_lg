@@ -163,7 +163,7 @@ async def _async_build_washer_course_sensor(
     initialized, in which case the washer simply has no course sensor
     (the rest of the washer sensors, all PAT-based, are unaffected).
     """
-    if runtime_data.wideq_client.devices is None:
+    if runtime_data.wideq_client is None or runtime_data.wideq_client.devices is None:
         return None
 
     matching_wideq_info = None

@@ -83,7 +83,7 @@ class SmartThinqHybridRuntimeData:
 
     def __init__(
         self,
-        wideq_client: ClientAsync,
+        wideq_client: ClientAsync | None,
         pat_api: ThinQApi,
     ) -> None:
         """Initialize the runtime data container."""
@@ -174,14 +174,20 @@ class SmartThinqHybridRuntimeData:
 type SmartThinqHybridConfigEntry = ConfigEntry[SmartThinqHybridRuntimeData]
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: SmartThinqHybridConfigEntry
-) -> bool:
-    """Set up SmartThinQ Hybrid from a config entry."""
+async def _async_try_connect_wideq(
+    hass: HomeAssistant,
+    entry: SmartThinqHybridConfigEntry,
+    session,
+) -> ClientAsync | None:
+    """Attempt to establish the wideq (ThinQ Web login) session.
 
-    session = async_get_clientsession(hass)
+    Returns the connected client, or None if authentication failed. Used
+    both for the initial connection attempt in async_setup_entry and for
+    periodic reconnection attempts in _async_refresh_wideq_auth when
+    wideq was unavailable at startup - the same client_id persistence
+    callback and client_id_created_on parsing apply in both cases.
+    """
 
-    # --- 1. Set up the wideq (ThinQ Web login) client ---
     def _persist_wideq_client_id(client_id: str, created_on) -> None:
         """Persist a refreshed wideq client_id back into the config entry."""
         new_data = dict(entry.data)
@@ -195,7 +201,7 @@ async def async_setup_entry(
     )
 
     try:
-        wideq_client = await ClientAsync.from_token(
+        return await ClientAsync.from_token(
             entry.data[CONF_WIDEQ_REFRESH_TOKEN],
             country=entry.data.get(CONF_WIDEQ_REGION, "KR"),
             language=entry.data.get(CONF_WIDEQ_LANGUAGE, "ko-KR"),
@@ -205,9 +211,34 @@ async def async_setup_entry(
             update_clientid_callback=_persist_wideq_client_id,
         )
     except Exception as exc:  # pylint: disable=broad-except
-        raise ConfigEntryNotReady(
-            f"Could not authenticate the ThinQ Web (wideq) session: {exc}"
-        ) from exc
+        _LOGGER.debug("wideq connection attempt failed: %s", exc)
+        return None
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: SmartThinqHybridConfigEntry
+) -> bool:
+    """Set up SmartThinQ Hybrid from a config entry."""
+
+    session = async_get_clientsession(hass)
+
+    # --- 1. Set up the wideq (ThinQ Web login) client ---
+    wideq_client = await _async_try_connect_wideq(hass, entry, session)
+    if wideq_client is None:
+        # wideq failure is not fatal: PAT covers power/mode/temperature/
+        # humidity/run-state for all devices. wideq is only needed for AC
+        # fan speed / swing / temperature (0.5-step) and the washer's
+        # current-course sensor. Log a warning and continue without it;
+        # _async_refresh_wideq_auth below will keep retrying, and reload
+        # the integration automatically once wideq becomes reachable
+        # again (e.g. after LG's server issue clears, or new ToS is
+        # accepted in the ThinQ app) - see that function's docstring.
+        _LOGGER.warning(
+            "Could not authenticate the ThinQ Web (wideq) session. "
+            "AC fan/swing/temperature control and washer current-course "
+            "sensor will be unavailable until wideq becomes reachable "
+            "again; this integration will keep retrying automatically."
+        )
 
     # --- 2. Set up the PAT (official) client ---
     pat_api = ThinQApi(
@@ -285,7 +316,7 @@ async def async_setup_entry(
                 exc,
             )
 
-    # --- 3.6. Schedule periodic wideq session refresh ---
+    # --- 3.6. Schedule periodic wideq session refresh / reconnection ---
     # The wideq (ThinQ Web login) access token expires after ~1 hour
     # (DEFAULT_TOKEN_VALIDITY = 3600s in core_async.py). Without
     # proactive renewal, the token silently expires and the next wideq
@@ -294,8 +325,32 @@ async def async_setup_entry(
     # Auth.refresh() is already idempotent: it skips the actual HTTP
     # call when the token is still valid, so calling it hourly is safe
     # regardless of the actual token validity returned by LG's server.
+    #
+    # If wideq was never connected in the first place (wideq_client is
+    # None - see step 1 above), this instead retries the full connection
+    # on the same schedule. On success, it triggers a full reload of the
+    # config entry: entities like the AC climate entity decide whether
+    # to expose fan/swing control and 0.5-degree temperature steps in
+    # their __init__ (see climate.py), which only runs once at entity
+    # creation - there is no way to retroactively add those features to
+    # an already-created entity, so a reload (which recreates every
+    # entity from scratch with the now-available wideq_client) is the
+    # only way to pick this up automatically without user action.
     async def _async_refresh_wideq_auth(now: datetime | None = None) -> None:
-        """Refresh the wideq access token on schedule."""
+        """Refresh the wideq access token, or retry connecting if it's down."""
+        if wideq_client is None:
+            reconnected_client = await _async_try_connect_wideq(hass, entry, session)
+            if reconnected_client is not None:
+                _LOGGER.info(
+                    "wideq (ThinQ Web login) is reachable again; reloading "
+                    "the integration to enable AC fan/swing/temperature "
+                    "control and the washer current-course sensor"
+                )
+                await reconnected_client.close()
+                hass.async_create_task(
+                    hass.config_entries.async_reload(entry.entry_id)
+                )
+            return
         try:
             await wideq_client.refresh_auth()
             _LOGGER.debug("wideq session refreshed successfully")
@@ -312,7 +367,7 @@ async def async_setup_entry(
     )
 
     # --- 4. Match wideq AC devices to their PAT counterpart for fan/swing ---
-    if wideq_client.devices:
+    if wideq_client is not None and wideq_client.devices:
         for wideq_device_info in wideq_client.devices:
             if wideq_device_info.type != WideqDeviceType.AC:
                 continue
@@ -359,5 +414,6 @@ async def async_unload_entry(
     if unload_ok and entry.runtime_data:
         if entry.runtime_data.mqtt_client is not None:
             await entry.runtime_data.mqtt_client.async_disconnect()
-        await entry.runtime_data.wideq_client.close()
+        if entry.runtime_data.wideq_client is not None:
+            await entry.runtime_data.wideq_client.close()
     return unload_ok

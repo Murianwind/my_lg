@@ -1,0 +1,185 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  bdd-tests:
+    name: BDD / keyword-driven tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install integration runtime requirements
+        # Reads requirements straight out of manifest.json so this step
+        # can never silently drift out of sync with what the integration
+        # actually declares it needs.
+        run: |
+          python -m pip install --upgrade pip
+          python - <<'PY' > requirements-manifest.txt
+          import json
+          manifest = json.load(open("custom_components/my_lg/manifest.json"))
+          print("\n".join(manifest.get("requirements", [])))
+          PY
+          cat requirements-manifest.txt
+          pip install -r requirements-manifest.txt
+
+      - name: Install test requirements
+        run: pip install -r requirements-test.txt
+
+      - name: Run BDD / keyword-driven test suite
+        # Never let a test failure stop the workflow here - the report
+        # steps below (which run unconditionally via `if: always()`)
+        # need to run either way so failures are visible, not just
+        # silently red in the raw log.
+        run: python -m pytest tests/ -v --junitxml=test-results.xml
+        continue-on-error: true
+        id: pytest
+
+      - name: Write results to the workflow run summary
+        # Always runs (pass or fail) and needs no extra permissions or
+        # third-party action, so this is the one reporting step
+        # guaranteed to show results even if the check-run step below
+        # can't (e.g. restricted GITHUB_TOKEN on a fork PR).
+        if: always()
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          tree = ET.parse("test-results.xml")
+          suite = tree.getroot().find("testsuite")
+          tests = int(suite.get("tests", 0))
+          failures = int(suite.get("failures", 0))
+          errors = int(suite.get("errors", 0))
+          skipped = int(suite.get("skipped", 0))
+          passed = tests - failures - errors - skipped
+          status = "✅ 통과" if failures == 0 and errors == 0 else "❌ 실패"
+
+          lines = [
+              f"### 테스트 결과 (Python ${{ matrix.python-version }}): {status}",
+              "",
+              f"| 전체 | 통과 | 실패 | 오류 | 스킵 | 소요 시간 |",
+              f"|---|---|---|---|---|---|",
+              f"| {tests} | {passed} | {failures} | {errors} | {skipped} | {suite.get('time')}s |",
+          ]
+
+          failed_cases = [
+              case for case in suite.findall("testcase")
+              if case.find("failure") is not None or case.find("error") is not None
+          ]
+          if failed_cases:
+              lines += ["", "#### 실패한 시나리오", ""]
+              for case in failed_cases:
+                  lines.append(f"- `{case.get('classname')}::{case.get('name')}`")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Publish test results as a check run
+        # Adds pass/fail annotations directly on the commit/PR (richer
+        # than the plain-text summary above), but needs checks:write -
+        # kept as a best-effort addition, not the only reporting path.
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: BDD tests (Python ${{ matrix.python-version }})
+          path: test-results.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Fail the job if tests failed
+        # The pytest step above deliberately continues past a test
+        # failure so the reporting steps still run; this is what
+        # actually turns the job red for a failing test suite.
+        if: steps.pytest.outcome == 'failure'
+        run: exit 1
+
+      - name: Publish raw JUnit XML as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-py${{ matrix.python-version }}
+          path: test-results.xml
+
+  lint-import-check:
+    name: Import sanity check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install integration runtime requirements
+        run: |
+          python -m pip install --upgrade pip
+          python - <<'PY' > requirements-manifest.txt
+          import json
+          manifest = json.load(open("custom_components/my_lg/manifest.json"))
+          print("\n".join(manifest.get("requirements", [])))
+          PY
+          pip install -r requirements-manifest.txt
+          pip install "homeassistant>=2024.9.0"
+
+      - name: Byte-compile every module (catches syntax errors early)
+        run: python -m py_compile $(find custom_components/my_lg -name "*.py")
+
+      - name: Import every platform module
+        working-directory: custom_components
+        run: |
+          python - <<'PY'
+          import importlib
+
+          # Defensive shim: some Home Assistant versions only expose the
+          # older AddEntitiesCallback name. Only fills it in if missing,
+          # so this is a no-op against any version that already has it.
+          from homeassistant.helpers import entity_platform
+          if not hasattr(entity_platform, "AddConfigEntryEntitiesCallback"):
+              entity_platform.AddConfigEntryEntitiesCallback = (
+                  entity_platform.AddEntitiesCallback
+              )
+
+          modules = [
+              "my_lg",
+              "my_lg.binary_sensor",
+              "my_lg.climate",
+              "my_lg.config_flow",
+              "my_lg.const",
+              "my_lg.coordinator_course",
+              "my_lg.coordinator_pat",
+              "my_lg.device_router",
+              "my_lg.humidifier",
+              "my_lg.mqtt",
+              "my_lg.sensor",
+              "my_lg.switch",
+          ]
+          for name in modules:
+              importlib.import_module(name)
+              print(f"OK  {name}")
+          PY

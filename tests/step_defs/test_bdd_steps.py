@@ -15,7 +15,7 @@ import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 
 from homeassistant.components.climate import ClimateEntityFeature
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 import keywords as kw
@@ -33,7 +33,7 @@ scenarios("../features/device_router_matching.feature")
 scenarios("../features/mqtt_robustness.feature")
 scenarios("../features/config_flow_dedup.feature")
 scenarios("../features/washer_course.feature")
-
+scenarios("../features/humidifier_switch_pat_commands.feature")
 
 @pytest.fixture
 def world():
@@ -45,6 +45,13 @@ def world():
 
 _WIDEQ_TYPE_MAP = {"AC": WideqDeviceType.AC, "WASHER": WideqDeviceType.WASHER}
 
+# PAT 에러 코드 문자열 (ThinQAPIErrorCodes는 str, Enum이라 아래 문자열
+# 값과 exc.code == ThinQAPIErrorCodes.XXX 비교가 그대로 성립한다)
+_PAT_ERROR_CODES = {
+    "NOT_CONNECTED_DEVICE": "1222",
+    "INVALID_COMMAND_ERROR": "2207",
+    "COMMAND_NOT_SUPPORTED_IN_MODE": "2305",
+}
 
 # --------------------------------------------------------------------
 # Given
@@ -137,7 +144,15 @@ def given_washer_course_coordinator_running(world):
     kw.given_runtime_data(world)
     kw.given_washer_course_coordinator(world, "RUNNING")
 
+@given("정상 상태의 제습기 엔티티가 있다")
+def given_dehumidifier_entity(world):
+    kw.given_dehumidifier_entity(world)
 
+
+@given("정상 상태의 에너지 절약 스위치 엔티티가 있다")
+def given_ac_energy_saving_switch_entity(world):
+    kw.given_ac_energy_saving_switch_entity(world)
+    
 # --------------------------------------------------------------------
 # When
 # --------------------------------------------------------------------
@@ -266,7 +281,25 @@ def course_update_attempted_while_reauth_needed(world):
 def wideq_login_succeeds(world, username):
     kw.when_wideq_login_succeeds_in_config_flow(world, username)
 
+@when(parsers.parse("제습기의 {action} 동작을 호출한다"))
+def dehumidifier_action_invoked(world, action):
+    kw.when_dehumidifier_action_invoked(world, action)
 
+
+@when(parsers.parse("제습기의 {action} 동작이 {error_name}로 실패한다"))
+def dehumidifier_pat_command_fails(world, action, error_name):
+    kw.when_dehumidifier_pat_command_fails(world, action, _PAT_ERROR_CODES[error_name])
+
+
+@when(parsers.parse("스위치의 {action} 동작을 호출한다"))
+def switch_action_invoked(world, action):
+    kw.when_switch_action_invoked(world, action)
+
+
+@when(parsers.parse("스위치의 {action} 동작이 {error_name}로 실패한다"))
+def switch_pat_command_fails(world, action, error_name):
+    kw.when_switch_pat_command_fails(world, action, _PAT_ERROR_CODES[error_name])
+    
 # --------------------------------------------------------------------
 # Then
 # --------------------------------------------------------------------
@@ -432,3 +465,27 @@ def already_configured_checked(world):
 @then("대기 중인 온도 전송 작업은 취소되어야 한다")
 def pending_temperature_task_cancelled(world):
     assert kw.then_pending_temperature_task_was_cancelled(world)
+
+@then(parsers.parse("예외는 ServiceValidationError 이어야 한다"))
+def exception_is_service_validation_error(world):
+    assert kw.then_exception_is_instance_of(world, ServiceValidationError)
+
+
+@then("제습기의 set_dehumidifier_operation_mode가 POWER_ON으로 호출되어야 한다")
+def dehumidifier_operation_mode_called_with_on(world):
+    assert kw.then_dehumidifier_pat_method_called(world, "turn_on")
+
+
+@then("제습기의 set_dehumidifier_operation_mode가 POWER_OFF로 호출되어야 한다")
+def dehumidifier_operation_mode_called_with_off(world):
+    assert kw.then_dehumidifier_pat_method_called(world, "turn_off")
+
+
+@then("set_power_save_enabled가 True로 호출되어야 한다")
+def power_save_called_with_true(world):
+    assert kw.then_switch_power_save_called_with(world, True)
+
+
+@then("set_power_save_enabled가 False로 호출되어야 한다")
+def power_save_called_with_false(world):
+    assert kw.then_switch_power_save_called_with(world, False)

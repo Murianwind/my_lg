@@ -24,6 +24,7 @@ from .coordinator_course import WasherCourseCoordinator
 from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
 from .device_router import match_wideq_to_pat
 from .wideq import DeviceType as WideqDeviceType
+from .wideq.core_exceptions import InvalidCredentialError as WideqInvalidCredentialError
 from .wideq.devices.ac import AirConditionerFanSwingDevice
 from .wideq.devices.washerDryer import WMDevice
 

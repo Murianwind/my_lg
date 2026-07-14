@@ -1,0 +1,7 @@
+# Test-only dependencies. The integration's own runtime requirements
+# (thinqconnect, xmltodict, charset_normalizer, cryptography) come from
+# custom_components/my_lg/manifest.json and are installed separately in
+# CI so this file doesn't silently drift out of sync with it.
+homeassistant>=2024.9.0
+pytest>=8.0.0
+pytest-bdd>=7.0.0

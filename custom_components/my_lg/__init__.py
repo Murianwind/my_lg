@@ -251,7 +251,8 @@ async def async_setup_entry(
     try:
         pat_device_entries = await async_discover_pat_devices(pat_api)
     except Exception as exc:  # pylint: disable=broad-except
-        await wideq_client.close()
+        if wideq_client is not None:
+            await wideq_client.close()
         raise ConfigEntryNotReady(
             f"Could not retrieve the PAT device list: {exc}"
         ) from exc

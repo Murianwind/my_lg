@@ -36,6 +36,7 @@ import my_lg.humidifier as humidifier_mod
 import my_lg.mqtt as mqtt_mod
 import my_lg.sensor as sensor_mod
 import my_lg.switch as switch_mod
+import my_lg.coordinator_pat as coordinator_pat_mod
 from my_lg import SmartThinqHybridRuntimeData
 from my_lg.coordinator_pat import PatDeviceCoordinator
 from my_lg.wideq.core_exceptions import APIError as WideqAPIError
@@ -1493,3 +1494,178 @@ def then_course_sensor_is_not_none(world: World) -> bool:
 
 def then_washer_wideq_device_registered(world: World) -> bool:
     return world.extra["pat_device_id"] in world.runtime_data.washer_wideq_devices
+
+# --------------------------------------------------------------------
+# climate.py의 RestoreEntity(async_added_to_hass) 관련 keyword
+#
+# fan_mode/swing_mode/target_temperature는 전부 wideq write-only라서
+# 읽어올 방법이 없다. 그래서 HA 재시작 후 이 복원 로직이 깨지면,
+# 에어컨은 계속 잘 돌고 있는데도 화면에는 값이 비어 보이는 문제가
+# 생긴다 - 과거 실제로 있었던 문제를 고치려고 만든 로직인데 지금까지
+# 테스트가 없었다.
+# --------------------------------------------------------------------
+
+
+def when_entity_restored_with_last_state(
+    world: World,
+    fan_mode: str | None = None,
+    swing_mode: str | None = None,
+    temperature: str | None = None,
+) -> None:
+    """async_get_last_state()가 특정 속성을 가진 이전 상태를 반환하는 상황에서
+    async_added_to_hass()를 호출한다."""
+    fake_state = MagicMock()
+    attributes = {}
+    if fan_mode is not None:
+        attributes["fan_mode"] = fan_mode
+    if swing_mode is not None:
+        attributes["swing_mode"] = swing_mode
+    if temperature is not None:
+        attributes["temperature"] = temperature
+    fake_state.attributes = attributes
+    world.entity.async_get_last_state = AsyncMock(return_value=fake_state)
+    asyncio.run(world.entity.async_added_to_hass())
+
+
+def when_entity_restored_with_no_last_state(world: World) -> None:
+    """이전 상태 자체가 없는(최초 실행) 상황에서 async_added_to_hass()를 호출한다."""
+    world.entity.async_get_last_state = AsyncMock(return_value=None)
+    asyncio.run(world.entity.async_added_to_hass())
+
+
+def then_entity_fan_mode_is(world: World, expected) -> bool:
+    return world.entity.fan_mode == expected
+
+
+def then_entity_swing_mode_is(world: World, expected) -> bool:
+    return world.entity.swing_mode == expected
+
+
+def then_entity_target_temperature_is(world: World, expected) -> bool:
+    return world.entity.target_temperature == expected
+
+
+# --------------------------------------------------------------------
+# humidifier.py / switch.py의 단순 속성(property) getter 관련 keyword
+#
+# 코드량은 적지만(대부분 한 줄짜리 getter) 하나도 테스트가 없었다.
+# --------------------------------------------------------------------
+
+
+def then_dehumidifier_is_on(world: World, expected: bool) -> bool:
+    return world.entity.is_on == expected
+
+
+def then_dehumidifier_mode_is(world: World, expected: str) -> bool:
+    return world.entity.mode == expected
+
+
+def then_dehumidifier_current_humidity_is(world: World, expected: int) -> bool:
+    return world.entity.current_humidity == expected
+
+
+def then_dehumidifier_target_humidity_is(world: World, expected: int) -> bool:
+    return world.entity.target_humidity == expected
+
+
+def then_dehumidifier_action_is_drying(world: World) -> bool:
+    from homeassistant.components.humidifier import HumidifierAction
+
+    return world.entity.action == HumidifierAction.DRYING
+
+
+def then_dehumidifier_humidity_range_is(world: World, expected_min: int, expected_max: int) -> bool:
+    return world.entity.min_humidity == expected_min and world.entity.max_humidity == expected_max
+
+
+def then_switch_is_on(world: World, expected: bool) -> bool:
+    return world.entity.is_on == expected
+
+
+# --------------------------------------------------------------------
+# coordinator_pat.py의 기기 발견/생성 및 REST 폴백 관련 keyword
+# (async_discover_pat_devices, async_build_pat_device,
+#  PatDeviceCoordinator._async_update_data)
+#
+# 기기 목록을 잘못 걸러내거나(async_discover_pat_devices), 프로필
+# 로드가 실패했는데 조용히 None을 반환하는 경우(async_build_pat_device)
+# 둘 다 "기기가 그냥 안 보인다"는 조용한 증상으로만 나타난다.
+# --------------------------------------------------------------------
+
+
+def when_discovering_pat_devices(world: World, raw_devices: list | None) -> None:
+    """async_discover_pat_devices()를 실제 /devices 응답 형태로 호출한다."""
+    thinq_api = MagicMock()
+    thinq_api.async_get_device_list = AsyncMock(return_value=raw_devices)
+    world.result = asyncio.run(coordinator_pat_mod.async_discover_pat_devices(thinq_api))
+
+
+def when_building_pat_device(
+    world: World, device_type: str, profile_result: str = "success"
+) -> None:
+    """async_build_pat_device()를 호출한다.
+
+    profile_result: "success"(정상 profile 반환), "error"(profile
+    로드 중 ThinQAPIException 발생) 중 하나.
+    """
+    thinq_api = MagicMock()
+    if profile_result == "success":
+        thinq_api.async_get_device_profile = AsyncMock(return_value={"property": {}})
+    else:
+        thinq_api.async_get_device_profile = AsyncMock(
+            side_effect=ThinQAPIException("1234", "프로필 로드 실패", {})
+        )
+    device_entry = {
+        "deviceId": "test-device-id",
+        "deviceInfo": {
+            "deviceType": device_type,
+            "alias": "테스트기기",
+            "modelName": "TEST_MODEL",
+        },
+    }
+    world.result = asyncio.run(
+        coordinator_pat_mod.async_build_pat_device(thinq_api, device_entry)
+    )
+
+
+def then_built_device_is_none(world: World) -> bool:
+    return world.result is None
+
+
+def then_built_device_is_not_none(world: World) -> bool:
+    return world.result is not None
+
+
+def when_rest_fallback_update_succeeds(world: World) -> None:
+    """PAT REST 폴백(_async_update_data)이 정상적으로 상태를 받아오는 상황을 만든다."""
+    world.coordinator.thinq_api.async_get_device_status = AsyncMock(
+        return_value={
+            "airConJobMode": {"currentJobMode": "COOL"},
+            "operation": {"airConOperationMode": "POWER_ON"},
+        }
+    )
+    world.coordinator.mark_unreachable()
+    try:
+        world.result = asyncio.run(world.coordinator._async_update_data())
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_rest_fallback_returns_empty_status(world: World) -> None:
+    """PAT REST 폴백이 빈 상태(falsy)를 반환하는 상황을 만든다."""
+    world.coordinator.thinq_api.async_get_device_status = AsyncMock(return_value=None)
+    try:
+        world.result = asyncio.run(world.coordinator._async_update_data())
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_rest_fallback_raises(world: World) -> None:
+    """PAT REST 폴백 호출이 ThinQAPIException으로 실패하는 상황을 만든다."""
+    world.coordinator.thinq_api.async_get_device_status = AsyncMock(
+        side_effect=ThinQAPIException("1234", "상태 조회 실패", {})
+    )
+    try:
+        world.result = asyncio.run(world.coordinator._async_update_data())
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc

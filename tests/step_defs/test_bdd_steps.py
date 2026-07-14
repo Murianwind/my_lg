@@ -44,6 +44,7 @@ scenarios("../features/washer_course_matching.feature")
 scenarios("../features/climate_restore_state.feature")
 scenarios("../features/humidifier_switch_properties.feature")
 scenarios("../features/coordinator_pat_discovery.feature")
+scenarios("../features/climate_fan_swing_success.feature")
 
 @pytest.fixture
 def world():
@@ -95,6 +96,12 @@ def given_fan_swing_device(world, n1, n2):
         vertical_steps=[f"STEP_{i}" for i in range(n2)],
     )
 
+@given(parsers.parse("wideq 수평 스텝 전용 팬/스윙 연동 기기(풍속 {n1:d}단계, 수평 스텝 {n2:d}단계)가 있다"))
+def given_horizontal_only_fan_swing_device(world, n1, n2):
+    world.extra["fan_swing_device"] = kw.given_fan_swing_device(
+        fan_speeds=[f"SPEED_{i}" for i in range(n1)],
+        horizontal_steps=[f"HSTEP_{i}" for i in range(n2)],
+    )
 
 @given("이 코디네이터와 wideq 기기로 climate 엔티티를 만든다")
 @when("이 코디네이터와 wideq 기기로 climate 엔티티를 만든다")
@@ -554,6 +561,20 @@ def rest_fallback_empty(world):
 def rest_fallback_raises(world):
     kw.when_rest_fallback_raises(world)
 
+@when(parsers.parse('풍속을 "{fan_mode}"로 정상 설정한다'))
+def set_fan_mode_normally(world, fan_mode):
+    kw.when_setting_fan_mode(world, fan_mode)
+
+
+@when(parsers.parse('스윙을 "{swing_mode}"로 정상 설정한다'))
+def set_swing_mode_normally(world, swing_mode):
+    kw.when_setting_swing_mode(world, swing_mode)
+
+
+@when("세션 만료 후 재시도가 InvalidCredentialError로 실패한다")
+def session_expires_then_retry_raises_invalid_credential(world):
+    kw.when_wideq_session_expires_then_retry_raises_invalid_credential(world)
+    
 # --------------------------------------------------------------------
 # Then
 # --------------------------------------------------------------------
@@ -614,6 +635,11 @@ def no_exception_raised(world):
 @then("표시되는 풍속은 변경 전 값 그대로여야 한다")
 def fan_mode_unchanged(world):
     assert kw.then_fan_mode_unchanged(world)
+
+
+@then(parsers.parse('표시되는 풍속은 "{expected}" 이어야 한다'))
+def entity_fan_mode_equals(world, expected):
+    assert kw.then_entity_fan_mode_equals(world, expected)
 
 
 @then("표시되는 목표 온도는 변경 전 값 그대로여야 한다")
@@ -904,3 +930,12 @@ def built_device_is_none(world):
 @then("생성된 기기는 None이 아니어야 한다")
 def built_device_is_not_none(world):
     assert kw.then_built_device_is_not_none(world)
+
+@then(parsers.parse('표시되는 스윙 모드는 "{expected}" 이어야 한다'))
+def entity_swing_mode_equals(world, expected):
+    assert kw.then_entity_swing_mode_equals(world, expected)
+
+
+@then(parsers.parse('수평 스텝 메서드가 "{expected}"로 호출되어야 한다'))
+def fan_swing_device_horizontal_step_called_with(world, expected):
+    assert kw.then_fan_swing_device_horizontal_step_called_with(world, expected)

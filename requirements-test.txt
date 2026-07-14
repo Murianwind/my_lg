@@ -1,7 +1,20 @@
 # Test-only dependencies. The integration's own runtime requirements
 # (thinqconnect, xmltodict, charset_normalizer, cryptography) come from
-# custom_components/my_lg/manifest.json and are installed separately in
-# CI so this file doesn't silently drift out of sync with it.
+# custom_components/my_lg/manifest.json and are installed from that
+# manifest via .github/scripts/print_manifest_requirements.py, so this
+# file doesn't silently drift out of sync with it.
+#
+# IMPORTANT: this file must always be pip-installed TOGETHER with
+# custom_components/my_lg/manifest.json's requirements, in one pip
+# invocation - not two separate `pip install` calls. homeassistant pins
+# aiohttp to an exact version, while newer thinqconnect releases require
+# a newer aiohttp; installed separately, pip has no way to know about
+# the other install's constraints and the second install silently
+# breaks the first one's dependency underneath it (no error, just a
+# broken environment). Installed together, pip's resolver finds a
+# thinqconnect version whose own aiohttp requirement is actually
+# compatible with homeassistant's pin instead.
+#   pip install -r requirements-manifest.txt -r requirements-test.txt
 homeassistant>=2024.9.0
 pytest>=8.0.0
 pytest-bdd>=7.0.0

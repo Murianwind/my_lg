@@ -39,6 +39,8 @@ scenarios("../features/mqtt_push_status.feature")
 scenarios("../features/climate_wideq_retry_branches.feature")
 scenarios("../features/wideq_reauth_binary_sensor.feature")
 scenarios("../features/mqtt_subscribe_failure_counting.feature")
+scenarios("../features/mqtt_connection_lifecycle.feature")
+scenarios("../features/washer_course_matching.feature")
 
 
 @pytest.fixture
@@ -165,6 +167,54 @@ def given_ac_energy_saving_switch_entity(world):
 @given("이 runtime_data로 재인증 필요 센서를 만든다")
 def given_wideq_reauth_sensor(world):
     kw.given_wideq_reauth_sensor(world)
+
+
+@given("기기 목록 없이 MQTT 매니저가 있다")
+def given_mqtt_manager_no_devices(world):
+    kw.given_mqtt_manager(world)
+
+
+@given("기기 2대와 연결된 클라이언트를 가진 MQTT 매니저가 있다")
+def given_mqtt_manager_two_devices_connected(world):
+    kw.given_mqtt_manager(world, device_ids=["dev-1", "dev-2"], with_connected_client=True)
+
+
+@given("기기 2대를 가졌지만 클라이언트가 연결되지 않은 MQTT 매니저가 있다")
+def given_mqtt_manager_two_devices_not_connected(world):
+    kw.given_mqtt_manager(world, device_ids=["dev-1", "dev-2"], with_connected_client=False)
+
+
+@given("기기 목록 없이 연결된 클라이언트를 가진 MQTT 매니저가 있다")
+def given_mqtt_manager_no_devices_connected(world):
+    kw.given_mqtt_manager(world, device_ids=[], with_connected_client=True)
+
+
+@given("wideq 클라이언트 자체가 없는 세탁기 코스 센서 설정이 있다")
+def given_washer_course_setup_no_wideq_client(world):
+    kw.given_washer_course_sensor_setup(world, wideq_devices=None, wideq_client_present=False)
+
+
+@given("wideq 기기 목록이 None인 세탁기 코스 센서 설정이 있다")
+def given_washer_course_setup_devices_none(world):
+    kw.given_washer_course_sensor_setup(world, wideq_devices=None, wideq_client_present=True)
+
+
+@given("wideq 기기 목록에 에어컨만 있는 세탁기 코스 센서 설정이 있다")
+def given_washer_course_setup_only_ac(world):
+    ac_info = kw.given_wideq_device_info(WideqDeviceType.AC, "테스트에어컨")
+    kw.given_washer_course_sensor_setup(world, wideq_devices=[ac_info])
+
+
+@given("wideq 기기 목록에 별칭이 다른 세탁기가 있는 코스 센서 설정이 있다")
+def given_washer_course_setup_mismatched_alias(world):
+    washer_info = kw.given_wideq_device_info(WideqDeviceType.WASHER, "다른세탁기")
+    kw.given_washer_course_sensor_setup(world, wideq_devices=[washer_info])
+
+
+@given("wideq 기기 목록에 별칭이 일치하는 세탁기가 있는 코스 센서 설정이 있다")
+def given_washer_course_setup_matching_alias(world):
+    washer_info = kw.given_wideq_device_info(WideqDeviceType.WASHER, "테스트세탁기")
+    kw.given_washer_course_sensor_setup(world, wideq_devices=[washer_info])
 
 
 # --------------------------------------------------------------------
@@ -386,6 +436,61 @@ def count_subscribe_failures_other_thinq_error(world):
 @when("typeerror가_섞인 결과 목록으로 구독 실패 개수를 센다")
 def count_subscribe_failures_type_error(world):
     kw.when_counting_subscribe_failures(world, [TypeError("잘못된 타입"), None])
+
+
+@when("MQTT 연결을 시도해서 성공한다")
+def mqtt_connect_succeeds(world):
+    kw.when_mqtt_connect_succeeds(world)
+
+
+@when("MQTT 연결 시도가 클라이언트 없이 끝난다")
+def mqtt_connect_returns_no_client(world):
+    kw.when_mqtt_connect_returns_no_client(world)
+
+
+@when("MQTT 연결 시도 중 예외가 발생한다")
+def mqtt_connect_raises(world):
+    kw.when_mqtt_connect_raises(world)
+
+
+@when("구독을 시작한다")
+def start_subscribes(world):
+    kw.when_start_subscribes_called(world)
+
+
+@when("구독을 해제한다")
+def end_subscribes(world):
+    kw.when_end_subscribes_called(world)
+
+
+@when("MQTT 연결을 끊는다")
+def mqtt_disconnect(world):
+    kw.when_mqtt_disconnect_called(world)
+
+
+@when("클라이언트 연결 해제가 실패하는 상태에서 MQTT 연결을 끊는다")
+def mqtt_disconnect_with_client_failure(world):
+    kw.when_mqtt_client_disconnect_raises_then_disconnect_called(world)
+
+
+@when("구독을 갱신한다")
+def refresh_subscribe(world):
+    kw.when_refresh_subscribe_called(world)
+
+
+@when("코스 센서를 만든다")
+def build_washer_course_sensor(world):
+    kw.when_building_washer_course_sensor(world)
+
+
+@when("모델 정보 로드가 실패하는 상태로 코스 센서를 만든다")
+def build_washer_course_sensor_load_failure(world):
+    kw.when_building_washer_course_sensor(world, init_device_info_result="failure")
+
+
+@when("모델 정보 로드 중 예외가 발생하는 상태로 코스 센서를 만든다")
+def build_washer_course_sensor_load_error(world):
+    kw.when_building_washer_course_sensor(world, init_device_info_result="error")
 
 
 # --------------------------------------------------------------------
@@ -623,3 +728,38 @@ def binary_sensor_attributes_present(world):
 @then(parsers.parse("구독 실패 개수는 {expected:d} 이어야 한다"))
 def subscribe_failure_count_is(world, expected):
     assert kw.then_subscribe_failure_count_is(world, expected)
+
+
+@then(parsers.parse("MQTT 연결 결과는 {expected} 이어야 한다"))
+def mqtt_connect_result_is(world, expected):
+    assert kw.then_mqtt_connect_result_is(world, expected == "True")
+
+
+@then(parsers.parse("thinq_api의 {method_name}는 {expected:d} 번 호출되어야 한다"))
+def thinq_api_method_called_times(world, method_name, expected):
+    assert kw.then_thinq_api_method_called_times(world, method_name, expected)
+
+
+@then("MQTT 클라이언트의 async_connect_mqtt가 호출되어야 한다")
+def mqtt_client_connect_mqtt_called(world):
+    assert kw.then_mqtt_client_connect_mqtt_called(world)
+
+
+@then("MQTT 클라이언트의 async_disconnect가 호출되어야 한다")
+def mqtt_client_disconnect_called(world):
+    assert kw.then_mqtt_client_disconnect_called(world)
+
+
+@then("코스 센서는 None 이어야 한다")
+def course_sensor_is_none(world):
+    assert kw.then_course_sensor_is_none(world)
+
+
+@then("코스 센서는 None이 아니어야 한다")
+def course_sensor_is_not_none(world):
+    assert kw.then_course_sensor_is_not_none(world)
+
+
+@then("세탁기 wideq 기기가 등록되어야 한다")
+def washer_wideq_device_registered(world):
+    assert kw.then_washer_wideq_device_registered(world)

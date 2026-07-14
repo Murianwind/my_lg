@@ -1276,3 +1276,220 @@ def when_counting_subscribe_failures(world: World, results: list) -> None:
 
 def then_subscribe_failure_count_is(world: World, expected: int) -> bool:
     return world.result == expected
+
+
+# --------------------------------------------------------------------
+# mqtt.py의 연결/구독 생명주기 관련 keyword
+# (async_connect, async_start_subscribes, async_end_subscribes,
+#  async_disconnect, async_refresh_subscribe)
+#
+# _count_subscribe_failures만 따로 떼서 검증했었고, 정작 이 함수들
+# 자체는 한 번도 호출해본 적이 없었다. async_start_subscribes가
+# 조용히 실패하면 push 자체가 안 들어오고 REST 폴백(1시간 간격)에만
+# 의존하게 되는데, 에러 로그 말고는 사용자가 알 방법이 없다.
+# --------------------------------------------------------------------
+
+
+def given_mqtt_manager(
+    world: World, device_ids: list[str] | None = None, with_connected_client: bool = False
+) -> None:
+    """ThinQMQTT 인스턴스를 만들어 world.extra["mqtt"]에 저장한다.
+
+    hass.async_create_task를 실제 이벤트 루프에 스케줄하도록 바꿔서,
+    thinq_api의 구독 관련 코루틴들이 asyncio.gather로 정상 처리되게
+    한다 (MagicMock 기본값은 코루틴이 아니라서 gather가 못 받는다).
+    """
+    world.hass.async_create_task = lambda coro: asyncio.ensure_future(coro)
+
+    thinq_api = MagicMock()
+    thinq_api.async_post_push_subscribe = AsyncMock(return_value=None)
+    thinq_api.async_post_event_subscribe = AsyncMock(return_value=None)
+    thinq_api.async_delete_push_subscribe = AsyncMock(return_value=None)
+    thinq_api.async_delete_event_subscribe = AsyncMock(return_value=None)
+    world.extra["thinq_api"] = thinq_api
+
+    coordinators = {device_id: MagicMock() for device_id in (device_ids or [])}
+    mqtt = mqtt_mod.ThinQMQTT(world.hass, thinq_api, "client-id", coordinators)
+
+    if with_connected_client:
+        fake_client = MagicMock()
+        fake_client.async_connect_mqtt = AsyncMock()
+        fake_client.async_disconnect = AsyncMock()
+        mqtt.client = fake_client
+
+    world.extra["mqtt"] = mqtt
+
+
+def when_mqtt_connect_succeeds(world: World) -> None:
+    """ThinQMQTTClient 생성과 async_prepare_mqtt()가 모두 성공하는 상황을 만든다."""
+    from unittest.mock import patch
+
+    async def _fake_client_factory(thinq_api, client_id, on_message):
+        fake_client = MagicMock()
+        fake_client.async_prepare_mqtt = AsyncMock(return_value=True)
+        return fake_client
+
+    with patch.object(mqtt_mod, "ThinQMQTTClient", _fake_client_factory):
+        world.result = asyncio.run(world.extra["mqtt"].async_connect())
+
+
+def when_mqtt_connect_returns_no_client(world: World) -> None:
+    """ThinQMQTTClient 생성이 None을 반환하는(비정상) 상황을 만든다."""
+    from unittest.mock import patch
+
+    async def _fake_client_factory(thinq_api, client_id, on_message):
+        return None
+
+    with patch.object(mqtt_mod, "ThinQMQTTClient", _fake_client_factory):
+        world.result = asyncio.run(world.extra["mqtt"].async_connect())
+
+
+def when_mqtt_connect_raises(world: World) -> None:
+    """ThinQMQTTClient 생성 중 ThinQAPIException이 발생하는 상황을 만든다."""
+    from unittest.mock import patch
+
+    async def _fake_client_factory(thinq_api, client_id, on_message):
+        raise ThinQAPIException("1234", "연결 실패", {})
+
+    with patch.object(mqtt_mod, "ThinQMQTTClient", _fake_client_factory):
+        try:
+            world.result = asyncio.run(world.extra["mqtt"].async_connect())
+        except Exception as exc:  # pylint: disable=broad-except
+            world.exception = exc
+
+
+def then_mqtt_connect_result_is(world: World, expected: bool) -> bool:
+    return world.result == expected
+
+
+def when_start_subscribes_called(world: World) -> None:
+    asyncio.run(world.extra["mqtt"].async_start_subscribes())
+
+
+def when_end_subscribes_called(world: World) -> None:
+    asyncio.run(world.extra["mqtt"].async_end_subscribes())
+
+
+def when_mqtt_disconnect_called(world: World) -> None:
+    try:
+        asyncio.run(world.extra["mqtt"].async_disconnect())
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_mqtt_client_disconnect_raises_then_disconnect_called(world: World) -> None:
+    """client.async_disconnect() 자체가 예외를 던지는 상황에서 async_disconnect()를 호출한다."""
+    world.extra["mqtt"].client.async_disconnect = AsyncMock(
+        side_effect=ThinQAPIException("1234", "연결 해제 실패", {})
+    )
+    when_mqtt_disconnect_called(world)
+
+
+def when_refresh_subscribe_called(world: World) -> None:
+    asyncio.run(world.extra["mqtt"].async_refresh_subscribe())
+
+
+def then_thinq_api_method_called_times(world: World, method_name: str, expected: int) -> bool:
+    mock_method = getattr(world.extra["thinq_api"], method_name)
+    return mock_method.call_count == expected
+
+
+def then_mqtt_client_connect_mqtt_called(world: World) -> bool:
+    return world.extra["mqtt"].client.async_connect_mqtt.called
+
+
+def then_mqtt_client_disconnect_called(world: World) -> bool:
+    return world.extra["mqtt"].client.async_disconnect.called
+
+
+# --------------------------------------------------------------------
+# sensor.py의 _async_build_washer_course_sensor (wideq-PAT 세탁기 매칭)
+# 관련 keyword
+#
+# 매칭이 잘못돼도(엉뚱한 기기와 엮이거나, 매칭 실패를 놓치는 경우)
+# 예외가 나지 않는 "조용한 버그" 유형이라 별도로 검증해둘 가치가
+# 크다.
+# --------------------------------------------------------------------
+
+
+def given_wideq_device_info(device_type, name: str):
+    """wideq /devices 응답 항목 하나를 흉내낸 가짜 객체를 만든다."""
+    info = MagicMock()
+    info.type = device_type
+    info.name = name
+    return info
+
+
+def given_washer_course_sensor_setup(
+    world: World, wideq_devices: list | None, wideq_client_present: bool = True
+) -> None:
+    """세탁기 PAT 코디네이터 + wideq 기기 목록을 갖춘 runtime_data를 구성한다.
+
+    `wideq_devices`가 None이면 wideq_client.devices 자체가 None인
+    상황(예: wideq 연결은 됐지만 기기 목록을 아직 못 받은 경우)을
+    만든다. `wideq_client_present=False`면 wideq_client 자체가 없는
+    상황(재인증 필요 등)을 만든다.
+    """
+    washer_device = given_pat_washer_device(
+        status=[
+            {
+                "runState": {"currentState": "POWER_OFF"},
+                "location": {"locationName": "MAIN"},
+            }
+        ]
+    )
+    pat_coordinator = given_pat_coordinator(world, washer_device)
+    world.extra["pat_device_id"] = pat_coordinator.device.device_id
+
+    if wideq_client_present:
+        client = MagicMock()
+        client.devices = wideq_devices
+        given_runtime_data(world, wideq_client=client)
+    else:
+        given_runtime_data(world, wideq_client=None)
+
+    world.runtime_data.pat_coordinators[pat_coordinator.device.device_id] = pat_coordinator
+
+
+def when_building_washer_course_sensor(world: World, init_device_info_result: str = "success") -> None:
+    """_async_build_washer_course_sensor()를 직접 호출한다.
+
+    init_device_info_result: "success"(모델 정보 로드 성공, True),
+    "failure"(로드는 됐지만 False 반환), "error"(로드 중 예외 발생)
+    중 하나. WMDevice 생성 자체는 patch로 대체해서, 실제 wideq
+    프로토콜(모델 정보 요청 등)까지 태우지 않고 매칭 로직만 검증한다.
+    """
+    from unittest.mock import patch
+
+    def _fake_wmdevice_factory(wideq_client, device_info):
+        fake = MagicMock()
+        fake.name = device_info.name
+        if init_device_info_result == "success":
+            fake.init_device_info = AsyncMock(return_value=True)
+        elif init_device_info_result == "failure":
+            fake.init_device_info = AsyncMock(return_value=False)
+        else:
+            fake.init_device_info = AsyncMock(side_effect=RuntimeError("모델 정보 로드 실패"))
+        return fake
+
+    with patch.object(sensor_mod, "WMDevice", _fake_wmdevice_factory):
+        world.result = asyncio.run(
+            sensor_mod._async_build_washer_course_sensor(
+                world.hass,
+                world.runtime_data,
+                world.coordinator,
+                world.extra["pat_device_id"],
+            )
+        )
+
+
+def then_course_sensor_is_none(world: World) -> bool:
+    return world.result is None
+
+
+def then_course_sensor_is_not_none(world: World) -> bool:
+    return world.result is not None
+
+
+def then_washer_wideq_device_registered(world: World) -> bool:
+    return world.extra["pat_device_id"] in world.runtime_data.washer_wideq_devices

@@ -29,14 +29,19 @@ from thinqconnect.devices.dehumidifier import DehumidifierDevice
 from thinqconnect.devices.washer import WasherDevice
 
 import my_lg
+import my_lg.binary_sensor as binary_sensor_mod
 import my_lg.climate as climate_mod
 import my_lg.coordinator_course as coordinator_course_mod
 import my_lg.humidifier as humidifier_mod
+import my_lg.mqtt as mqtt_mod
 import my_lg.sensor as sensor_mod
 import my_lg.switch as switch_mod
 from my_lg import SmartThinqHybridRuntimeData
 from my_lg.coordinator_pat import PatDeviceCoordinator
+from my_lg.wideq.core_exceptions import APIError as WideqAPIError
 from my_lg.wideq.core_exceptions import InvalidCredentialError as WideqInvalidCredentialError
+from my_lg.wideq.core_exceptions import NotConnectedError as WideqNotConnectedError
+from my_lg.wideq.core_exceptions import NotLoggedInError as WideqNotLoggedInError
 
 
 # --------------------------------------------------------------------
@@ -77,6 +82,18 @@ def given_pat_ac_device(status: dict | None = None) -> AirConditionerDevice:
 
     `status` is applied via the SDK's own `update_status`, exercising
     the real thinqconnect parsing path rather than a hand-rolled fake.
+
+    `temperatureInUnits` must be a LIST of dicts (one per supported
+    unit, "C"/"F"), with plain field names (no C/F suffix) inside each
+    entry - thinqconnect's AirConditionerProfile treats this resource
+    as a "custom resource" (see _generate_custom_resource_properties)
+    and strips the profile_map's C/F-suffixed key itself before looking
+    it up inside each list entry. A flat `{"temperature": {...}}` dict
+    (what this fixture originally had) is silently ignored by the SDK
+    - `isinstance(resource_property, dict)` is the branch taken for
+    *non*-custom resources, so this resource's properties never get
+    registered and current_temperature/min_temp/max_temp always read
+    back as None. Confirmed by direct reproduction against the real SDK.
     """
     profile = {
         "property": {
@@ -94,13 +111,15 @@ def given_pat_ac_device(status: dict | None = None) -> AirConditionerDevice:
                     "value": {"r": ["POWER_ON", "POWER_OFF"], "w": ["POWER_ON", "POWER_OFF"]},
                 }
             },
-            "temperature": {
-                "currentTemperature": {"type": "range", "mode": ["r"]},
-                "targetTemperature": {"type": "range", "mode": ["r", "w"]},
-                "minTemperature": {"type": "range", "mode": ["r"]},
-                "maxTemperature": {"type": "range", "mode": ["r"]},
-                "unit": "C",
-            },
+            "temperatureInUnits": [
+                {
+                    "currentTemperature": {"type": "range", "mode": ["r"]},
+                    "targetTemperature": {"type": "range", "mode": ["r", "w"]},
+                    "minTemperature": {"type": "range", "mode": ["r"]},
+                    "maxTemperature": {"type": "range", "mode": ["r"]},
+                    "unit": "C",
+                }
+            ],
             "powerSave": {
                 "powerSaveEnabled": {
                     "type": "boolean",
@@ -915,6 +934,7 @@ def then_course_wideq_poll_not_called(world: World) -> bool:
 def then_course_result_equals(world: World, expected: str) -> bool:
     return world.result == expected
 
+
 # --------------------------------------------------------------------
 # humidifier.py (제습기) / switch.py (에어컨 에너지 절약) 관련 keyword
 #
@@ -1073,3 +1093,186 @@ def when_switch_pat_command_fails(world: World, action: str, error_code: str) ->
 def then_switch_power_save_called_with(world: World, expected: bool) -> bool:
     mock_call = world.entity.coordinator.device.set_power_save_enabled
     return mock_call.called and mock_call.call_args.args == (expected,)
+
+
+# --------------------------------------------------------------------
+# coordinator_pat.py의 handle_mqtt_status 관련 keyword
+#
+# LG 서버가 push를 보낼 때마다 실제로 실행되는 함수라 실행 빈도가
+# 가장 높은 코드 중 하나인데, 지금까지 한 번도 직접 호출해본 적이
+# 없었다.
+# --------------------------------------------------------------------
+
+
+def when_mqtt_status_applied(world: World, current_temperature: float) -> None:
+    """coordinator.handle_mqtt_status()에 실제 push 페이로드 형태의 dict를 직접 넣는다.
+
+    AirConditionerProfile은 temperatureInUnits를 "custom resource"로
+    취급해서, 리스트 안의 각 항목(단위별)에서 C/F 접미사 없는 필드명
+    (currentTemperature 등)을 읽는다 - given_pat_ac_device의 profile
+    구조와 반드시 맞아야 한다.
+    """
+    world.coordinator.handle_mqtt_status(
+        {"temperatureInUnits": [{"currentTemperature": current_temperature, "unit": "C"}]}
+    )
+
+
+def when_empty_mqtt_status_applied(world: World) -> None:
+    """빈 페이로드({} 또는 None)가 와도 크래시 없이 무시되는지 확인한다."""
+    try:
+        world.coordinator.handle_mqtt_status({})
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def then_coordinator_current_temperature_is(world: World, expected: float) -> bool:
+    from thinqconnect.devices.const import Property
+
+    return world.coordinator.get_status(Property.CURRENT_TEMPERATURE_C) == expected
+
+
+# --------------------------------------------------------------------
+# climate.py의 _async_send_wideq_command 나머지 분기 관련 keyword
+#
+# 이 함수는 팬속도/스윙/온도가 전부 거치는 재시도·에러 처리 엔진이고,
+# 이번 세션 중 실제 버그가 두 번 발견된 곳이다. 지금까지는
+# InvalidCredentialError와 정상 성공 두 경로만 테스트되어 있었다.
+# 여기서는 _WIDEQ_RETRY_DELAY_SECONDS(0.6초)를 짧게 줄여서, 실제로
+# 재시도 대기를 하긴 하되 테스트가 느려지지 않게 한다.
+# --------------------------------------------------------------------
+
+
+def _run_wideq_command_with_short_retry_delay(world: World, retry_call, description: str = "테스트 명령") -> None:
+    from unittest.mock import patch
+
+    with patch.object(climate_mod, "_WIDEQ_RETRY_DELAY_SECONDS", 0.01):
+        try:
+            world.result = asyncio.run(
+                world.entity._async_send_wideq_command(retry_call, description=description)
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            world.exception = exc
+
+
+def when_wideq_call_raises_not_connected(world: World) -> None:
+    """wideq 명령이 기기 오프라인(NotConnectedError)으로 실패하는 상황을 만든다."""
+
+    async def _fail():
+        raise WideqNotConnectedError("오프라인")
+
+    _run_wideq_command_with_short_retry_delay(world, _fail)
+
+
+def when_wideq_session_expires_then_retry_succeeds(world: World) -> None:
+    """wideq 세션이 만료됐다가(NotLoggedInError), refresh_auth 후 재시도가 성공하는 상황을 만든다."""
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise WideqNotLoggedInError("세션 만료")
+        return None
+
+    world.entity._wideq_client.refresh_auth = AsyncMock()
+    _run_wideq_command_with_short_retry_delay(world, _flaky)
+
+
+def when_wideq_session_refresh_itself_fails(world: World) -> None:
+    """wideq 세션 만료 후, refresh_auth 자체가 실패하는 상황을 만든다."""
+
+    async def _fail():
+        raise WideqNotLoggedInError("세션 만료")
+
+    world.entity._wideq_client.refresh_auth = AsyncMock(side_effect=RuntimeError("네트워크 오류"))
+    _run_wideq_command_with_short_retry_delay(world, _fail)
+
+
+def when_wideq_transient_error_then_retry_succeeds(world: World) -> None:
+    """wideq가 일시적 에러 코드(0103 등)로 실패했다가, 재시도에서 성공하는 상황을 만든다."""
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise WideqAPIError("일시적 오류", code="0103")
+        return None
+
+    _run_wideq_command_with_short_retry_delay(world, _flaky)
+
+
+def when_wideq_transient_error_persists(world: World) -> None:
+    """wideq가 일시적 에러 코드로 실패하고, 재시도에서도 계속 같은 에러가 나는 상황을 만든다."""
+
+    async def _always_fail():
+        raise WideqAPIError("일시적 오류", code="0103")
+
+    _run_wideq_command_with_short_retry_delay(world, _always_fail)
+
+
+def when_wideq_non_transient_error(world: World) -> None:
+    """wideq가 일시적이지 않은 에러 코드로 실패하는 상황을 만든다 (재시도 없이 바로 실패해야 함)."""
+    call_count = {"n": 0}
+
+    async def _fail():
+        call_count["n"] += 1
+        raise WideqAPIError("치명적 오류", code="9999")
+
+    world.extra["wideq_call_count"] = call_count
+    _run_wideq_command_with_short_retry_delay(world, _fail)
+
+
+def then_wideq_call_count_is(world: World, expected: int) -> bool:
+    return world.extra["wideq_call_count"]["n"] == expected
+
+
+def then_wideq_result_is_true(world: World) -> bool:
+    return world.result is True
+
+
+def then_wideq_result_is_false(world: World) -> bool:
+    return world.result is False
+
+
+# --------------------------------------------------------------------
+# binary_sensor.py (WideqReauthNeededSensor) 관련 keyword
+# --------------------------------------------------------------------
+
+
+def given_wideq_reauth_sensor(world: World) -> None:
+    """WideqReauthNeededSensor를 직접 만들어 world.entity에 저장한다."""
+    fake_entry = MagicMock()
+    fake_entry.entry_id = "test-entry-id"
+    fake_entry.runtime_data = world.runtime_data
+    world.entity = binary_sensor_mod.WideqReauthNeededSensor(fake_entry)
+
+
+def then_binary_sensor_is_on(world: World) -> bool:
+    return world.entity.is_on is True
+
+
+def then_binary_sensor_is_off(world: World) -> bool:
+    return world.entity.is_on is False
+
+
+def then_binary_sensor_attributes_present(world: World) -> bool:
+    attrs = world.entity.extra_state_attributes
+    return attrs is not None and "guidance" in attrs and "affected_features" in attrs
+
+
+def then_binary_sensor_attributes_absent(world: World) -> bool:
+    return world.entity.extra_state_attributes is None
+
+
+# --------------------------------------------------------------------
+# mqtt.py의 _count_subscribe_failures 관련 keyword
+#
+# 순수 함수라 hass/coordinator 없이 바로 검증 가능하다.
+# --------------------------------------------------------------------
+
+
+def when_counting_subscribe_failures(world: World, results: list) -> None:
+    world.result = mqtt_mod.ThinQMQTT._count_subscribe_failures(results)
+
+
+def then_subscribe_failure_count_is(world: World, expected: int) -> bool:
+    return world.result == expected

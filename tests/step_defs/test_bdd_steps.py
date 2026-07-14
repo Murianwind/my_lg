@@ -32,6 +32,7 @@ scenarios("../features/filter_sensor_availability.feature")
 scenarios("../features/device_router_matching.feature")
 scenarios("../features/mqtt_robustness.feature")
 scenarios("../features/config_flow_dedup.feature")
+scenarios("../features/washer_course.feature")
 
 
 @pytest.fixture
@@ -125,6 +126,18 @@ def given_pat_device_entries(world, alias, device_type):
     kw.given_pat_device_entries(world, alias, device_type)
 
 
+@given("세탁기가 꺼진 상태로 코스 코디네이터가 만들어져 있다")
+def given_washer_course_coordinator_off(world):
+    kw.given_runtime_data(world)
+    kw.given_washer_course_coordinator(world, "POWER_OFF")
+
+
+@given("세탁기가 동작 중인 상태로 코스 코디네이터가 만들어져 있다")
+def given_washer_course_coordinator_running(world):
+    kw.given_runtime_data(world)
+    kw.given_washer_course_coordinator(world, "RUNNING")
+
+
 # --------------------------------------------------------------------
 # When
 # --------------------------------------------------------------------
@@ -148,6 +161,16 @@ def set_target_temperature(world, temperature):
 @when(parsers.parse("목표 온도를 {temperature:g}도로 설정한 직후 엔티티가 제거된다"))
 def set_temperature_then_remove_entity(world, temperature):
     kw.when_temperature_set_then_entity_removed(world, temperature)
+
+
+@when(parsers.parse("재인증이 필요한 상태에서 풍속을 {fan_mode}로 설정한다"))
+def set_fan_mode_while_reauth_needed(world, fan_mode):
+    kw.when_setting_fan_mode_while_reauth_needed(world, fan_mode)
+
+
+@when(parsers.parse("재인증이 필요한 상태에서 목표 온도를 {temperature:g}도로 설정하고 디바운스가 끝날 때까지 기다린다"))
+def set_temperature_while_reauth_needed(world, temperature):
+    kw.when_setting_temperature_while_reauth_needed_and_debounce_elapses(world, temperature)
 
 
 @when("PAT 전원 제어가 NOT_CONNECTED_DEVICE로 실패하는 상태에서 hvac_mode를 off로 설정한다")
@@ -207,6 +230,36 @@ def mqtt_receives_bad_json(world):
 @when("알려진 기기의 정상적인 DEVICE_STATUS 메시지를 수신한다")
 def mqtt_receives_valid_status(world):
     kw.when_mqtt_receives_valid_device_status(world)
+
+
+@when(parsers.parse("PAT 세탁기 상태가 {run_state}로 바뀐다"))
+def pat_washer_run_state_changes(world, run_state):
+    kw.when_pat_washer_run_state_changes(world, run_state)
+
+
+@when(parsers.parse('wideq가 코스 "{current_course}", 스마트코스 "{current_smartcourse}"를 반환한다'))
+def wideq_poll_returns_course(world, current_course, current_smartcourse):
+    kw.when_wideq_poll_returns_course(world, current_course, current_smartcourse)
+
+
+@when("wideq 코스 조회가 데이터 없이(None) 끝난다")
+def wideq_poll_returns_none_for_course(world):
+    kw.when_wideq_poll_returns_none_for_course(world)
+
+
+@when("wideq 코스 조회가 InvalidCredentialError로 실패한다")
+def wideq_poll_raises_invalid_credential_for_course(world):
+    kw.when_wideq_poll_raises_invalid_credential_for_course(world)
+
+
+@when("wideq 코스 조회가 예상치 못한 예외로 실패한다")
+def wideq_poll_raises_generic_error_for_course(world):
+    kw.when_wideq_poll_raises_generic_error_for_course(world)
+
+
+@when("재인증이 필요한 상태에서 코스 갱신을 시도한다")
+def course_update_attempted_while_reauth_needed(world):
+    kw.when_course_update_attempted_while_reauth_needed(world)
 
 
 @when(parsers.parse('wideq 로그인이 "{username}"으로 성공한다'))
@@ -271,6 +324,16 @@ def no_exception_raised(world):
     assert kw.then_no_exception_was_raised(world)
 
 
+@then("표시되는 풍속은 변경 전 값 그대로여야 한다")
+def fan_mode_unchanged(world):
+    assert kw.then_fan_mode_unchanged(world)
+
+
+@then("표시되는 목표 온도는 변경 전 값 그대로여야 한다")
+def target_temperature_unchanged(world):
+    assert kw.then_target_temperature_unchanged(world)
+
+
 @then("예외는 UpdateFailed 이어야 한다")
 def exception_is_update_failed(world):
     assert kw.then_exception_is_instance_of(world, UpdateFailed)
@@ -329,6 +392,31 @@ def mqtt_no_exception(world):
 @then("해당 코디네이터의 handle_mqtt_status가 호출되어야 한다")
 def mqtt_handler_called(world):
     assert kw.then_mqtt_coordinator_handle_status_called(world)
+
+
+@then("코스 폴링은 활성 상태여야 한다")
+def course_polling_active(world):
+    assert kw.then_course_polling_is_active(world)
+
+
+@then("코스 폴링은 비활성 상태여야 한다")
+def course_polling_inactive(world):
+    assert kw.then_course_polling_is_inactive(world)
+
+
+@then(parsers.parse('코스 표시값은 "{expected}" 이어야 한다'))
+def course_data_is(world, expected):
+    assert kw.then_course_data_is(world, expected)
+
+
+@then(parsers.parse('코스 결과는 "{expected}" 이어야 한다'))
+def course_result_equals(world, expected):
+    assert kw.then_course_result_equals(world, expected)
+
+
+@then("wideq poll은 호출되지 않았어야 한다")
+def course_wideq_poll_not_called(world):
+    assert kw.then_course_wideq_poll_not_called(world)
 
 
 @then(parsers.parse('고유 ID는 "{expected}"으로 설정되어야 한다'))

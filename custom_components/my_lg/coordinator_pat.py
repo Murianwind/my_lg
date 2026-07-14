@@ -10,10 +10,11 @@ climate.py and coordinator_course.py.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 import logging
 
-from thinqconnect import ThinQAPIException
+from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.air_conditioner import AirConditionerDevice
 from thinqconnect.devices.connect_device import ConnectBaseDevice, ConnectMainDevice
 from thinqconnect.devices.const import Location
@@ -22,6 +23,7 @@ from thinqconnect.devices.washer import WasherDevice
 from thinqconnect.thinq_api import ThinQApi
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -272,3 +274,44 @@ class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
     def available(self) -> bool:
         """Return whether the underlying device is available."""
         return self.coordinator.available
+
+    async def async_send_pat_command(
+        self, call, *, error_message: str | Callable[[Exception], str]
+    ) -> None:
+        """Send a PAT command, handling NOT_CONNECTED_DEVICE uniformly.
+
+        This is the one shared implementation of a pattern that used to
+        be copy-pasted (with slightly different wording each time) in
+        humidifier.py, switch.py, and twice in climate.py: on
+        NOT_CONNECTED_DEVICE, mark the coordinator unreachable (which
+        immediately flips `available` for every entity backed by it) and
+        return quietly - the device being briefly offline isn't
+        something the user needs an error popup for. Any other PAT
+        error is surfaced as a ServiceValidationError. On success, marks
+        the coordinator reachable again and requests a refresh so the
+        new state shows up promptly instead of waiting for the next
+        push/poll.
+
+        `error_message` is either a plain description (used to build
+        "{description}을(를) 변경할 수 없습니다: {exc}", the wording used
+        by most call sites) or a callable `(exc) -> str` for a site that
+        needs different phrasing (e.g. switch.py's "켤/끌 수 없습니다").
+        """
+        try:
+            await call()
+        except ThinQAPIException as exc:
+            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                _LOGGER.debug(
+                    "PAT command skipped for '%s': device is momentarily "
+                    "not connected to the cloud",
+                    self.coordinator.device.alias,
+                )
+                self.coordinator.mark_unreachable()
+                return
+            if callable(error_message):
+                message = error_message(exc)
+            else:
+                message = f"{error_message}을(를) 변경할 수 없습니다: {exc}"
+            raise ServiceValidationError(message) from exc
+        self.coordinator.mark_reachable()
+        await self.coordinator.async_request_refresh()

@@ -42,7 +42,8 @@ class WideqReauthNeededSensor(BinarySensorEntity):
     """
 
     _attr_has_entity_name = True
-    _attr_name = "wideq reauth needed"
+    _attr_name = None
+    _attr_translation_key = "wideq_reauth_needed"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_should_poll = False

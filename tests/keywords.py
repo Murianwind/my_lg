@@ -224,6 +224,60 @@ def when_setting_temperature(world: World, temperature: float) -> None:
     asyncio.run(world.entity.async_set_temperature(temperature=temperature))
 
 
+def when_temperature_set_then_entity_removed(world: World, temperature: float) -> None:
+    """Schedule the debounced temperature task, then remove the entity.
+
+    Runs entirely inside one asyncio.run() call so the real Task created
+    by async_set_temperature (via hass.async_create_task) and its
+    cancellation (via async_will_remove_from_hass) happen on the same
+    live event loop - a MagicMock hass would just return a MagicMock
+    instead of a real Task, which wouldn't actually exercise
+    Task.cancel() at all.
+    """
+
+    async def _run():
+        world.hass.async_create_task = lambda coro: asyncio.ensure_future(coro)
+        world.entity.hass = world.hass
+        # async_set_temperature calls async_write_ha_state() before the
+        # debounce, which normally requires a real entity_id (assigned
+        # when EntityPlatform adds the entity to hass) - not relevant to
+        # what this scenario checks (task scheduling/cancellation), so
+        # it's stubbed out rather than standing up a full entity platform.
+        world.entity.async_write_ha_state = MagicMock()
+        await world.entity.async_set_temperature(temperature=temperature)
+        world.extra["pending_task"] = world.entity._pending_temperature_task
+        await world.entity.async_will_remove_from_hass()
+        # Let the event loop process the cancellation before we inspect it.
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+
+def then_pending_temperature_task_was_cancelled(world: World) -> bool:
+    task = world.extra.get("pending_task")
+    return task is not None and task.cancelled()
+
+
+def when_setting_hvac_mode_with_pat_not_connected(world: World) -> None:
+    """Make the PAT power-off call raise NOT_CONNECTED_DEVICE, then call async_set_hvac_mode.
+
+    Exercises the shared PatCoordinatorEntity.async_send_pat_command
+    helper end-to-end (not just the coordinator's mark_unreachable
+    directly), to catch a regression in that shared implementation
+    itself rather than only in the lower-level flag it sets.
+    """
+    from homeassistant.components.climate import HVACMode
+    from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
+
+    world.entity.device.set_air_con_operation_mode = AsyncMock(
+        side_effect=ThinQAPIException(ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE, "offline", {})
+    )
+    try:
+        asyncio.run(world.entity.async_set_hvac_mode(HVACMode.OFF))
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
 def when_wideq_call_raises_invalid_credential(world: World) -> None:
     """Drive _async_send_wideq_command with a call that raises InvalidCredentialError."""
 
@@ -601,5 +655,53 @@ def then_setup_succeeded_without_exception(world: World) -> bool:
 
 def then_integration_reload_was_called(world: World) -> bool:
     return bool(world.extra.get("reload_called"))
+
+
+# --------------------------------------------------------------------
+# config_flow unique_id / duplicate-prevention keywords
+# --------------------------------------------------------------------
+
+
+def when_wideq_login_succeeds_in_config_flow(world: World, username: str) -> None:
+    """Drive SmartThinqHybridFlowHandler.async_step_user with a mocked login.
+
+    Patches ClientAsync.auth_info_from_user_login (so no real network
+    call happens) and the flow's own async_set_unique_id /
+    _abort_if_unique_id_configured (so this stays a unit test of "did
+    our code call these with the right value", not an integration test
+    of HA's config-entry storage).
+    """
+    from unittest.mock import patch
+
+    import my_lg.config_flow as config_flow_mod
+
+    flow = config_flow_mod.SmartThinqHybridFlowHandler()
+    flow.hass = world.hass
+
+    async def fake_auth_info_from_user_login(*args, **kwargs):
+        return {"refresh_token": "dummy-refresh-token", "oauth_url": "https://example.invalid"}
+
+    flow.async_set_unique_id = AsyncMock()
+    flow._abort_if_unique_id_configured = MagicMock()
+    flow.async_step_pat = AsyncMock(return_value={"type": "form", "step_id": "pat"})
+    world.extra["flow"] = flow
+
+    with patch.object(
+        config_flow_mod.ClientAsync,
+        "auth_info_from_user_login",
+        fake_auth_info_from_user_login,
+    ):
+        world.result = asyncio.run(
+            flow.async_step_user({"username": username, "password": "dummy-pw"})
+        )
+
+
+def then_flow_unique_id_was_set_to(world: World, expected: str) -> bool:
+    flow = world.extra["flow"]
+    return flow.async_set_unique_id.await_args.args[0] == expected
+
+
+def then_flow_checked_already_configured(world: World) -> bool:
+    return world.extra["flow"]._abort_if_unique_id_configured.called
 
 

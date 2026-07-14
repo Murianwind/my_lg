@@ -6,10 +6,10 @@
   "dependencies": [],
   "documentation": "https://github.com/Murianwind/my_lg",
   "integration_type": "hub",
-  "iot_class": "cloud_polling",
+  "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/Murianwind/my_lg/issues",
   "requirements": [
-    "thinqconnect==1.0.12",
+    "thinqconnect>=1.0.12",
     "xmltodict>=0.13.0",
     "charset_normalizer>=3.2.0",
     "cryptography>=42.0.0"

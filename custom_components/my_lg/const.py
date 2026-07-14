@@ -57,3 +57,10 @@ PAT_DEVICE_TYPE_WASHER = "DEVICE_WASHER"
 # Washer run states (PAT) that mean "not currently running" - used as the
 # trigger condition to stop polling wideq for the current-course sensor.
 WASHER_INACTIVE_STATES = {"POWER_OFF", "END", "ERROR"}
+
+# Dehumidifier target humidity range/step, confirmed against the real
+# device profile (this device does not expose these via a queryable
+# range property the way most PAT devices do, so they are fixed here).
+DEHUMIDIFIER_MIN_HUMIDITY = 30
+DEHUMIDIFIER_MAX_HUMIDITY = 70
+DEHUMIDIFIER_TARGET_HUMIDITY_STEP = 5

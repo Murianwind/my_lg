@@ -9,9 +9,6 @@ device, confirmed against the real device profile.
 
 from __future__ import annotations
 
-import logging
-
-from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.const import Property
 
 from homeassistant.components.humidifier import (
@@ -21,14 +18,16 @@ from homeassistant.components.humidifier import (
     HumidifierEntityFeature,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SmartThinqHybridConfigEntry
-from .const import PAT_DEVICE_TYPE_DEHUMIDIFIER
+from .const import (
+    DEHUMIDIFIER_MAX_HUMIDITY,
+    DEHUMIDIFIER_MIN_HUMIDITY,
+    DEHUMIDIFIER_TARGET_HUMIDITY_STEP,
+    PAT_DEVICE_TYPE_DEHUMIDIFIER,
+)
 from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
-
-_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -74,32 +73,6 @@ class SmartThinqHybridDehumidifierEntity(PatCoordinatorEntity, HumidifierEntity)
         """Return the PAT device wrapper."""
         return self.coordinator.device
 
-    async def _async_send_pat_command(self, call, *, description: str) -> None:
-        """Send a PAT command, translating errors into HA exceptions.
-
-        NOT_CONNECTED_DEVICE marks the coordinator unreachable (which
-        immediately updates `available` for every entity backed by it)
-        and returns quietly rather than raising a visible error - the
-        device being briefly offline isn't something the user needs an
-        error popup for, it's reflected in the entity going unavailable.
-        Any other PAT error is surfaced as a ServiceValidationError.
-        """
-        try:
-            await call()
-        except ThinQAPIException as exc:
-            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
-                _LOGGER.debug(
-                    "Could not set %s for '%s': device is momentarily "
-                    "not connected to the cloud",
-                    description,
-                    self.coordinator.device.alias,
-                )
-                self.coordinator.mark_unreachable()
-                return
-            raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc
-        self.coordinator.mark_reachable()
-        await self.coordinator.async_request_refresh()
-
     @property
     def is_on(self) -> bool | None:
         """Return whether the dehumidifier is on."""
@@ -137,42 +110,42 @@ class SmartThinqHybridDehumidifierEntity(PatCoordinatorEntity, HumidifierEntity)
     @property
     def extra_state_attributes(self) -> dict:
         """Return target_humidity_step (step=5 per the real device profile)."""
-        return {"target_humidity_step": 5}
+        return {"target_humidity_step": DEHUMIDIFIER_TARGET_HUMIDITY_STEP}
 
     @property
     def min_humidity(self) -> int:
         """Return the minimum target humidity supported."""
-        return 30
+        return DEHUMIDIFIER_MIN_HUMIDITY
 
     @property
     def max_humidity(self) -> int:
         """Return the maximum target humidity supported."""
-        return 70
+        return DEHUMIDIFIER_MAX_HUMIDITY
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the dehumidifier on."""
-        await self._async_send_pat_command(
+        await self.async_send_pat_command(
             lambda: self.device.set_dehumidifier_operation_mode("POWER_ON"),
-            description="전원",
+            error_message="전원",
         )
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn the dehumidifier off."""
-        await self._async_send_pat_command(
+        await self.async_send_pat_command(
             lambda: self.device.set_dehumidifier_operation_mode("POWER_OFF"),
-            description="전원",
+            error_message="전원",
         )
 
     async def async_set_mode(self, mode: str) -> None:
         """Set the dehumidifier's job mode."""
-        await self._async_send_pat_command(
+        await self.async_send_pat_command(
             lambda: self.device.set_current_job_mode(mode),
-            description="제습 모드",
+            error_message="제습 모드",
         )
 
     async def async_set_humidity(self, humidity: int) -> None:
         """Set the dehumidifier's target humidity."""
-        await self._async_send_pat_command(
+        await self.async_send_pat_command(
             lambda: self.device.set_target_humidity(humidity),
-            description="목표 습도",
+            error_message="목표 습도",
         )

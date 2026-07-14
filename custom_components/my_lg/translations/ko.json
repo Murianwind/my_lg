@@ -70,6 +70,11 @@
           }
         }
       }
+    },
+    "binary_sensor": {
+      "wideq_reauth_needed": {
+        "name": "wideq 재인증 필요"
+      }
     }
   }
 }

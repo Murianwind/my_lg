@@ -6,21 +6,15 @@ read/write boolean, confirmed against the real device profile).
 
 from __future__ import annotations
 
-import logging
-
-from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.const import Property
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SmartThinqHybridConfigEntry
 from .const import PAT_DEVICE_TYPE_AC
 from .coordinator_pat import PatCoordinatorEntity, PatDeviceCoordinator
-
-_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -61,29 +55,17 @@ class AcEnergySavingSwitch(PatCoordinatorEntity, SwitchEntity):
         return self.coordinator.get_status(Property.POWER_SAVE_ENABLED)
 
     async def _async_set_power_save(self, enabled: bool) -> None:
-        """Send the power-save command, handling NOT_CONNECTED_DEVICE.
+        """Send the power-save command via the shared PAT command helper.
 
-        See the matching helper in humidifier.py for why
-        NOT_CONNECTED_DEVICE is treated as "go unavailable" rather than
-        a visible error.
+        Uses a callable `error_message` (rather than the helper's default
+        "{description}을(를) 변경할 수 없습니다" template) to keep this
+        entity's existing, more specific wording ("켤/끌 수 없습니다").
         """
-        try:
-            await self.coordinator.device.set_power_save_enabled(enabled)
-        except ThinQAPIException as exc:
-            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
-                _LOGGER.debug(
-                    "Could not set energy saving for '%s': device is "
-                    "momentarily not connected to the cloud",
-                    self.coordinator.device.alias,
-                )
-                self.coordinator.mark_unreachable()
-                return
-            state = "켤" if enabled else "끌"
-            raise ServiceValidationError(
-                f"에너지 절약 모드를 {state} 수 없습니다: {exc}"
-            ) from exc
-        self.coordinator.mark_reachable()
-        await self.coordinator.async_request_refresh()
+        state = "켤" if enabled else "끌"
+        await self.async_send_pat_command(
+            lambda: self.coordinator.device.set_power_save_enabled(enabled),
+            error_message=lambda exc: f"에너지 절약 모드를 {state} 수 없습니다: {exc}",
+        )
 
     async def async_turn_on(self, **kwargs) -> None:
         """Enable energy saving."""

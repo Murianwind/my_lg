@@ -115,6 +115,11 @@
           }
         }
       }
+    },
+    "binary_sensor": {
+      "wideq_reauth_needed": {
+        "name": "wideq reauth needed"
+      }
     }
   }
 }

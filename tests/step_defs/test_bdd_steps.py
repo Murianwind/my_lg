@@ -31,6 +31,7 @@ scenarios("../features/washer_sensors.feature")
 scenarios("../features/filter_sensor_availability.feature")
 scenarios("../features/device_router_matching.feature")
 scenarios("../features/mqtt_robustness.feature")
+scenarios("../features/config_flow_dedup.feature")
 
 
 @pytest.fixture
@@ -144,6 +145,16 @@ def set_target_temperature(world, temperature):
     kw.when_setting_temperature(world, temperature)
 
 
+@when(parsers.parse("목표 온도를 {temperature:g}도로 설정한 직후 엔티티가 제거된다"))
+def set_temperature_then_remove_entity(world, temperature):
+    kw.when_temperature_set_then_entity_removed(world, temperature)
+
+
+@when("PAT 전원 제어가 NOT_CONNECTED_DEVICE로 실패하는 상태에서 hvac_mode를 off로 설정한다")
+def set_hvac_mode_with_pat_not_connected(world):
+    kw.when_setting_hvac_mode_with_pat_not_connected(world)
+
+
 @when("재인증이 필요한 상태에서 wideq 명령을 다시 시도한다")
 def retry_wideq_command_while_reauth_needed(world):
     kw.when_retrying_wideq_command_while_reauth_needed(world)
@@ -196,6 +207,11 @@ def mqtt_receives_bad_json(world):
 @when("알려진 기기의 정상적인 DEVICE_STATUS 메시지를 수신한다")
 def mqtt_receives_valid_status(world):
     kw.when_mqtt_receives_valid_device_status(world)
+
+
+@when(parsers.parse('wideq 로그인이 "{username}"으로 성공한다'))
+def wideq_login_succeeds(world, username):
+    kw.when_wideq_login_succeeds_in_config_flow(world, username)
 
 
 # --------------------------------------------------------------------
@@ -313,3 +329,18 @@ def mqtt_no_exception(world):
 @then("해당 코디네이터의 handle_mqtt_status가 호출되어야 한다")
 def mqtt_handler_called(world):
     assert kw.then_mqtt_coordinator_handle_status_called(world)
+
+
+@then(parsers.parse('고유 ID는 "{expected}"으로 설정되어야 한다'))
+def unique_id_set_to(world, expected):
+    assert kw.then_flow_unique_id_was_set_to(world, expected)
+
+
+@then("이미 등록된 계정인지 확인 절차가 실행되어야 한다")
+def already_configured_checked(world):
+    assert kw.then_flow_checked_already_configured(world)
+
+
+@then("대기 중인 온도 전송 작업은 취소되어야 한다")
+def pending_temperature_task_cancelled(world):
+    assert kw.then_pending_temperature_task_was_cancelled(world)

@@ -24,3 +24,10 @@ Feature: 에어컨 climate 엔티티의 wideq 유무에 따른 동작
     And wideq 기기 없이 climate 엔티티를 만든다
     When 목표 온도를 24.5도로 설정한다
     Then PAT의 냉방 목표 온도 설정 메서드가 반올림된 값으로 호출되어야 한다
+
+  Scenario: 디바운스 대기 중 엔티티가 제거되면 대기 중인 온도 전송 작업이 취소된다
+    Given 정상 상태(POWER_ON, COOL)의 에어컨 PAT 코디네이터가 있다
+    And wideq 팬/스윙 연동 기기(풍속 2단계, 수직 스텝 2단계)가 있다
+    And 이 코디네이터와 wideq 기기로 climate 엔티티를 만든다
+    When 목표 온도를 24.5도로 설정한 직후 엔티티가 제거된다
+    Then 대기 중인 온도 전송 작업은 취소되어야 한다

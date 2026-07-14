@@ -87,6 +87,16 @@ class SmartThinqHybridFlowHandler(ConfigFlow, domain=DOMAIN):
                 if not self._wideq_refresh_token:
                     errors["base"] = "invalid_auth"
                 else:
+                    # One LG account should only ever have one config
+                    # entry. The wideq username (an email or phone
+                    # number) is the one stable identifier available at
+                    # this point that doesn't rotate the way tokens do,
+                    # so it's what identifies "this account" across
+                    # setup attempts. Normalized (trimmed + lowercased)
+                    # since LG's login itself is case-insensitive for
+                    # email-style usernames.
+                    await self.async_set_unique_id(username.strip().lower())
+                    self._abort_if_unique_id_configured()
                     return await self.async_step_pat()
 
         return self.async_show_form(

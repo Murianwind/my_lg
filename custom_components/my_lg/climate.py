@@ -38,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.air_conditioner import AirConditionerDevice
 from thinqconnect.devices.const import Property
 
@@ -221,6 +220,20 @@ class SmartThinqHybridClimateEntity(
             self._last_target_temperature,
         )
 
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel any pending debounced temperature send before removal.
+
+        Without this, an entity removed (or a config entry unloaded)
+        while a temperature command is still sitting in its
+        _WIDEQ_COMMAND_DEBOUNCE_SECONDS debounce window would leave that
+        task running in the background against an entity that no longer
+        exists in hass by the time it wakes up and tries to send.
+        """
+        if self._pending_temperature_task is not None:
+            self._pending_temperature_task.cancel()
+            self._pending_temperature_task = None
+        await super().async_will_remove_from_hass()
+
     @property
     def device(self) -> AirConditionerDevice:
         """Return the PAT device wrapper."""
@@ -268,29 +281,25 @@ class SmartThinqHybridClimateEntity(
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the hvac mode via the PAT API."""
-        try:
-            if hvac_mode == HVACMode.OFF:
+        if hvac_mode == HVACMode.OFF:
+
+            async def _send_command() -> None:
                 await self.device.set_air_con_operation_mode("POWER_OFF")
-            else:
-                pat_mode = _HVAC_TO_PAT_JOB_MODE.get(hvac_mode)
-                if pat_mode is None:
-                    raise ServiceValidationError(f"Unsupported hvac mode: {hvac_mode}")
+
+        else:
+            pat_mode = _HVAC_TO_PAT_JOB_MODE.get(hvac_mode)
+            if pat_mode is None:
+                # Not a PAT-command failure (nothing was sent yet), so
+                # this is raised directly rather than going through the
+                # shared PAT-command helper below.
+                raise ServiceValidationError(f"Unsupported hvac mode: {hvac_mode}")
+
+            async def _send_command() -> None:
                 if self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE) == "POWER_OFF":
                     await self.device.set_air_con_operation_mode("POWER_ON")
                 await self.device.set_current_job_mode(pat_mode)
-        except ThinQAPIException as exc:
-            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
-                _LOGGER.debug(
-                    "Could not set hvac_mode for '%s': device is "
-                    "momentarily not connected to the cloud",
-                    self.coordinator.device.alias,
-                )
-                self.coordinator.mark_unreachable()
-                return
-            raise ServiceValidationError(
-                f"에어컨 모드를 변경할 수 없습니다: {exc}"
-            ) from exc
-        await self.coordinator.async_request_refresh()
+
+        await self.async_send_pat_command(_send_command, error_message="에어컨 모드")
 
     async def async_set_temperature(self, **kwargs) -> None:
         """Set the target temperature.
@@ -355,25 +364,14 @@ class SmartThinqHybridClimateEntity(
         just less precise than wideq's 0.5-degree steps.
         """
         rounded_temperature = round(temperature)
-        try:
+
+        async def _send_command() -> None:
             if hvac_mode == HVACMode.HEAT:
                 await self.device.set_heat_target_temperature_c(rounded_temperature)
             else:
                 await self.device.set_cool_target_temperature_c(rounded_temperature)
-        except ThinQAPIException as exc:
-            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
-                _LOGGER.debug(
-                    "Could not set temperature for '%s': device is "
-                    "momentarily not connected to the cloud",
-                    self.coordinator.device.alias,
-                )
-                self.coordinator.mark_unreachable()
-                return
-            raise ServiceValidationError(
-                f"목표 온도를 변경할 수 없습니다: {exc}"
-            ) from exc
-        self.coordinator.mark_reachable()
-        await self.coordinator.async_request_refresh()
+
+        await self.async_send_pat_command(_send_command, error_message="목표 온도")
 
     async def _async_debounced_set_temperature(self, temperature: float) -> None:
         """Wait out the debounce window, then send the temperature to wideq.

@@ -41,7 +41,9 @@ scenarios("../features/wideq_reauth_binary_sensor.feature")
 scenarios("../features/mqtt_subscribe_failure_counting.feature")
 scenarios("../features/mqtt_connection_lifecycle.feature")
 scenarios("../features/washer_course_matching.feature")
-
+scenarios("../features/climate_restore_state.feature")
+scenarios("../features/humidifier_switch_properties.feature")
+scenarios("../features/coordinator_pat_discovery.feature")
 
 @pytest.fixture
 def world():
@@ -492,6 +494,65 @@ def build_washer_course_sensor_load_failure(world):
 def build_washer_course_sensor_load_error(world):
     kw.when_building_washer_course_sensor(world, init_device_info_result="error")
 
+@when(parsers.parse('이전 상태(풍속 {fan_mode}, 스윙 {swing_mode}, 온도 {temperature})로 복원된다'))
+def entity_restored_with_last_state(world, fan_mode, swing_mode, temperature):
+    kw.when_entity_restored_with_last_state(
+        world,
+        fan_mode=None if fan_mode == "없음" else fan_mode,
+        swing_mode=None if swing_mode == "없음" else swing_mode,
+        temperature=None if temperature == "없음" else temperature,
+    )
+
+
+@when("이전 상태 없이 복원이 시도된다")
+def entity_restored_with_no_last_state(world):
+    kw.when_entity_restored_with_no_last_state(world)
+
+
+@when("PAT 기기 목록 조회 결과가 없다")
+def discover_pat_devices_empty(world):
+    kw.when_discovering_pat_devices(world, None)
+
+
+@when("PAT 기기 목록에 지원 기기와 미지원 기기가 섞여 있다")
+def discover_pat_devices_mixed(world):
+    kw.when_discovering_pat_devices(
+        world,
+        [
+            {"deviceId": "ac-1", "deviceInfo": {"deviceType": "DEVICE_AIR_CONDITIONER"}},
+            {"deviceId": "fridge-1", "deviceInfo": {"deviceType": "DEVICE_REFRIGERATOR"}},
+        ],
+    )
+
+
+@when("지원하지 않는 타입으로 PAT 기기를 생성한다")
+def build_pat_device_unsupported_type(world):
+    kw.when_building_pat_device(world, "DEVICE_REFRIGERATOR")
+
+
+@when("에어컨 타입으로 PAT 기기를 생성한다")
+def build_pat_device_ac(world):
+    kw.when_building_pat_device(world, "DEVICE_AIR_CONDITIONER")
+
+
+@when("프로필 로드가 실패하는 상태로 에어컨 타입 PAT 기기를 생성한다")
+def build_pat_device_profile_error(world):
+    kw.when_building_pat_device(world, "DEVICE_AIR_CONDITIONER", profile_result="error")
+
+
+@when("REST 폴백 상태 조회가 성공한다")
+def rest_fallback_succeeds(world):
+    kw.when_rest_fallback_update_succeeds(world)
+
+
+@when("REST 폴백이 빈 상태를 반환한다")
+def rest_fallback_empty(world):
+    kw.when_rest_fallback_returns_empty_status(world)
+
+
+@when("REST 폴백 호출이 실패한다")
+def rest_fallback_raises(world):
+    kw.when_rest_fallback_raises(world)
 
 # --------------------------------------------------------------------
 # Then
@@ -763,3 +824,83 @@ def course_sensor_is_not_none(world):
 @then("세탁기 wideq 기기가 등록되어야 한다")
 def washer_wideq_device_registered(world):
     assert kw.then_washer_wideq_device_registered(world)
+
+@then(parsers.parse('복원된 풍속은 "{expected}" 이어야 한다'))
+def entity_fan_mode_is(world, expected):
+    assert kw.then_entity_fan_mode_is(world, expected)
+
+
+@then("복원된 풍속은 None 이어야 한다")
+def entity_fan_mode_is_none(world):
+    assert kw.then_entity_fan_mode_is(world, None)
+
+
+@then(parsers.parse('복원된 스윙 모드는 "{expected}" 이어야 한다'))
+def entity_swing_mode_is(world, expected):
+    assert kw.then_entity_swing_mode_is(world, expected)
+
+
+@then(parsers.parse("복원된 목표 온도는 {expected:g} 이어야 한다"))
+def entity_target_temperature_is(world, expected):
+    assert kw.then_entity_target_temperature_is(world, expected)
+
+
+@then("복원된 목표 온도는 None 이어야 한다")
+def entity_target_temperature_is_none(world):
+    assert kw.then_entity_target_temperature_is(world, None)
+
+
+@then("제습기는 켜져 있어야 한다")
+def dehumidifier_is_on(world):
+    assert kw.then_dehumidifier_is_on(world, True)
+
+
+@then(parsers.parse('제습기 모드는 "{expected}" 이어야 한다'))
+def dehumidifier_mode_is(world, expected):
+    assert kw.then_dehumidifier_mode_is(world, expected)
+
+
+@then(parsers.parse("제습기 현재 습도는 {expected:d} 이어야 한다"))
+def dehumidifier_current_humidity_is(world, expected):
+    assert kw.then_dehumidifier_current_humidity_is(world, expected)
+
+
+@then(parsers.parse("제습기 목표 습도는 {expected:d} 이어야 한다"))
+def dehumidifier_target_humidity_is(world, expected):
+    assert kw.then_dehumidifier_target_humidity_is(world, expected)
+
+
+@then("제습기 동작 상태는 건조 중이어야 한다")
+def dehumidifier_action_drying(world):
+    assert kw.then_dehumidifier_action_is_drying(world)
+
+
+@then(parsers.parse("제습기 습도 범위는 {expected_min:d} 이상 {expected_max:d} 이하이어야 한다"))
+def dehumidifier_humidity_range_is(world, expected_min, expected_max):
+    assert kw.then_dehumidifier_humidity_range_is(world, expected_min, expected_max)
+
+
+@then("스위치는 꺼져 있어야 한다")
+def switch_is_off(world):
+    assert kw.then_switch_is_on(world, False)
+
+
+@then("PAT 기기 발견 결과는 빈 목록이어야 한다")
+def pat_discovery_result_empty(world):
+    assert world.result == []
+
+
+@then("PAT 기기 발견 결과에는 지원 기기만 남아야 한다")
+def pat_discovery_result_filtered(world):
+    assert len(world.result) == 1
+    assert world.result[0]["deviceId"] == "ac-1"
+
+
+@then("생성된 기기는 None 이어야 한다")
+def built_device_is_none(world):
+    assert kw.then_built_device_is_none(world)
+
+
+@then("생성된 기기는 None이 아니어야 한다")
+def built_device_is_not_none(world):
+    assert kw.then_built_device_is_not_none(world)

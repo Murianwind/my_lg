@@ -32,21 +32,30 @@ jobs:
           # and prints a warning (harmless, but pointless without this).
           cache-dependency-path: requirements-test.txt
 
-      - name: Install integration runtime requirements
-        # Reads requirements straight out of manifest.json (via a real
-        # script file, not an inline heredoc - a heredoc written inside
-        # an indented YAML block carries that indentation into the
-        # Python source itself and fails with IndentationError) so this
-        # step can never silently drift out of sync with what the
-        # integration actually declares it needs.
+      - name: Install requirements (integration + test, together)
+        # thinqconnect and homeassistant have to be installed in the
+        # SAME pip invocation, not two separate ones: pip's resolver
+        # only sees the constraints given in a single call. Installed
+        # separately, whichever runs second silently overrides a shared
+        # dependency the first one needs (concretely: homeassistant
+        # pins aiohttp==3.11.11, while newer thinqconnect releases
+        # require aiohttp>=3.14.0 - installed apart, the second install
+        # just downgrades/upgrades aiohttp under the first one's feet).
+        # Installed together, pip's resolver finds a thinqconnect
+        # version whose own aiohttp requirement is actually compatible
+        # with homeassistant's pin (currently resolves to
+        # thinqconnect==1.0.12) instead of silently producing a broken
+        # environment. Reads requirements straight out of manifest.json
+        # (via a real script file, not an inline heredoc - a heredoc
+        # written inside an indented YAML block carries that indentation
+        # into the Python source itself and fails with IndentationError)
+        # so this step can never silently drift out of sync with what
+        # the integration actually declares it needs.
         run: |
           python -m pip install --upgrade pip
           python .github/scripts/print_manifest_requirements.py > requirements-manifest.txt
           cat requirements-manifest.txt
-          pip install -r requirements-manifest.txt
-
-      - name: Install test requirements
-        run: pip install -r requirements-test.txt
+          pip install -r requirements-manifest.txt -r requirements-test.txt
 
       - name: Run BDD / keyword-driven test suite
         # Never let a test failure stop the workflow here - the report
@@ -105,13 +114,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-test.txt
 
-      - name: Install integration runtime requirements
+      - name: Install requirements (integration + homeassistant, together)
+        # See the matching step in the bdd-tests job for why this must
+        # be one pip invocation, not two.
         run: |
           python -m pip install --upgrade pip
           python .github/scripts/print_manifest_requirements.py > requirements-manifest.txt
           cat requirements-manifest.txt
-          pip install -r requirements-manifest.txt
-          pip install "homeassistant>=2024.9.0"
+          pip install -r requirements-manifest.txt "homeassistant>=2024.9.0"
 
       - name: Byte-compile every module (catches syntax errors early)
         run: python -m py_compile $(find custom_components/my_lg -name "*.py")

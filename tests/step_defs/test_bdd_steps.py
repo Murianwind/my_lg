@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
+from thinqconnect import ThinQAPIException
 
 from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
@@ -34,6 +35,11 @@ scenarios("../features/mqtt_robustness.feature")
 scenarios("../features/config_flow_dedup.feature")
 scenarios("../features/washer_course.feature")
 scenarios("../features/humidifier_switch_pat_commands.feature")
+scenarios("../features/mqtt_push_status.feature")
+scenarios("../features/climate_wideq_retry_branches.feature")
+scenarios("../features/wideq_reauth_binary_sensor.feature")
+scenarios("../features/mqtt_subscribe_failure_counting.feature")
+
 
 @pytest.fixture
 def world():
@@ -52,6 +58,7 @@ _PAT_ERROR_CODES = {
     "INVALID_COMMAND_ERROR": "2207",
     "COMMAND_NOT_SUPPORTED_IN_MODE": "2305",
 }
+
 
 # --------------------------------------------------------------------
 # Given
@@ -144,6 +151,7 @@ def given_washer_course_coordinator_running(world):
     kw.given_runtime_data(world)
     kw.given_washer_course_coordinator(world, "RUNNING")
 
+
 @given("정상 상태의 제습기 엔티티가 있다")
 def given_dehumidifier_entity(world):
     kw.given_dehumidifier_entity(world)
@@ -152,12 +160,19 @@ def given_dehumidifier_entity(world):
 @given("정상 상태의 에너지 절약 스위치 엔티티가 있다")
 def given_ac_energy_saving_switch_entity(world):
     kw.given_ac_energy_saving_switch_entity(world)
-    
+
+
+@given("이 runtime_data로 재인증 필요 센서를 만든다")
+def given_wideq_reauth_sensor(world):
+    kw.given_wideq_reauth_sensor(world)
+
+
 # --------------------------------------------------------------------
 # When
 # --------------------------------------------------------------------
 
 
+@given("이 기기에 보낸 명령이 오프라인으로 실패한다")
 @when("이 기기에 보낸 명령이 오프라인으로 실패한다")
 def command_fails_offline(world):
     kw.when_command_fails_with_not_connected(world)
@@ -281,6 +296,7 @@ def course_update_attempted_while_reauth_needed(world):
 def wideq_login_succeeds(world, username):
     kw.when_wideq_login_succeeds_in_config_flow(world, username)
 
+
 @when(parsers.parse("제습기의 {action} 동작을 호출한다"))
 def dehumidifier_action_invoked(world, action):
     kw.when_dehumidifier_action_invoked(world, action)
@@ -299,7 +315,79 @@ def switch_action_invoked(world, action):
 @when(parsers.parse("스위치의 {action} 동작이 {error_name}로 실패한다"))
 def switch_pat_command_fails(world, action, error_name):
     kw.when_switch_pat_command_fails(world, action, _PAT_ERROR_CODES[error_name])
-    
+
+
+@when(parsers.parse("MQTT push로 현재 온도 {temperature:g}가 도착한다"))
+def mqtt_status_applied(world, temperature):
+    kw.when_mqtt_status_applied(world, temperature)
+
+
+@when("빈 MQTT push 페이로드가 도착한다")
+def empty_mqtt_status_applied(world):
+    kw.when_empty_mqtt_status_applied(world)
+
+
+@when("wideq 명령이 NotConnectedError로 실패한다")
+def wideq_call_raises_not_connected(world):
+    kw.when_wideq_call_raises_not_connected(world)
+
+
+@when("wideq 세션이 만료됐다가 재시도가 성공한다")
+def wideq_session_expires_then_retry_succeeds(world):
+    kw.when_wideq_session_expires_then_retry_succeeds(world)
+
+
+@when("wideq 세션 갱신 자체가 실패한다")
+def wideq_session_refresh_itself_fails(world):
+    kw.when_wideq_session_refresh_itself_fails(world)
+
+
+@when("wideq가 일시적 에러 코드로 실패했다가 재시도에서 성공한다")
+def wideq_transient_error_then_retry_succeeds(world):
+    kw.when_wideq_transient_error_then_retry_succeeds(world)
+
+
+@when("wideq가 일시적 에러 코드로 계속 실패한다")
+def wideq_transient_error_persists(world):
+    kw.when_wideq_transient_error_persists(world)
+
+
+@when("wideq가 일시적이지 않은 에러 코드로 실패한다")
+def wideq_non_transient_error(world):
+    kw.when_wideq_non_transient_error(world)
+
+
+@when("runtime_data에 재인증이 필요하다고 표시한다")
+def mark_reauth_needed(world):
+    world.runtime_data.mark_wideq_reauth_needed()
+
+
+@when("빈 결과 목록으로 구독 실패 개수를 센다")
+def count_subscribe_failures_empty(world):
+    kw.when_counting_subscribe_failures(world, [])
+
+
+@when("이미_구독됨_에러만 있는 결과 목록으로 구독 실패 개수를 센다")
+def count_subscribe_failures_already_subscribed(world):
+    kw.when_counting_subscribe_failures(world, [ThinQAPIException("1207", "이미 구독됨", {})])
+
+
+@when("다른_thinq_에러가_섞인 결과 목록으로 구독 실패 개수를 센다")
+def count_subscribe_failures_other_thinq_error(world):
+    kw.when_counting_subscribe_failures(
+        world,
+        [
+            ThinQAPIException("1207", "이미 구독됨", {}),
+            ThinQAPIException("9999", "다른 에러", {}),
+        ],
+    )
+
+
+@when("typeerror가_섞인 결과 목록으로 구독 실패 개수를 센다")
+def count_subscribe_failures_type_error(world):
+    kw.when_counting_subscribe_failures(world, [TypeError("잘못된 타입"), None])
+
+
 # --------------------------------------------------------------------
 # Then
 # --------------------------------------------------------------------
@@ -466,6 +554,7 @@ def already_configured_checked(world):
 def pending_temperature_task_cancelled(world):
     assert kw.then_pending_temperature_task_was_cancelled(world)
 
+
 @then(parsers.parse("예외는 ServiceValidationError 이어야 한다"))
 def exception_is_service_validation_error(world):
     assert kw.then_exception_is_instance_of(world, ServiceValidationError)
@@ -489,3 +578,48 @@ def power_save_called_with_true(world):
 @then("set_power_save_enabled가 False로 호출되어야 한다")
 def power_save_called_with_false(world):
     assert kw.then_switch_power_save_called_with(world, False)
+
+
+@then(parsers.parse("코디네이터의 현재 온도는 {expected:g} 이어야 한다"))
+def coordinator_current_temperature_is(world, expected):
+    assert kw.then_coordinator_current_temperature_is(world, expected)
+
+
+@then("wideq 결과는 True 이어야 한다")
+def wideq_result_true(world):
+    assert kw.then_wideq_result_is_true(world)
+
+
+@then("wideq 결과는 False 이어야 한다")
+def wideq_result_false(world):
+    assert kw.then_wideq_result_is_false(world)
+
+
+@then(parsers.parse("wideq 호출 횟수는 {expected:d} 이어야 한다"))
+def wideq_call_count_is(world, expected):
+    assert kw.then_wideq_call_count_is(world, expected)
+
+
+@then("재인증 필요 센서는 꺼져 있어야 한다")
+def binary_sensor_off(world):
+    assert kw.then_binary_sensor_is_off(world)
+
+
+@then("재인증 필요 센서는 켜져 있어야 한다")
+def binary_sensor_on(world):
+    assert kw.then_binary_sensor_is_on(world)
+
+
+@then("재인증 필요 센서의 안내 속성은 없어야 한다")
+def binary_sensor_attributes_absent(world):
+    assert kw.then_binary_sensor_attributes_absent(world)
+
+
+@then("재인증 필요 센서의 안내 속성이 채워져 있어야 한다")
+def binary_sensor_attributes_present(world):
+    assert kw.then_binary_sensor_attributes_present(world)
+
+
+@then(parsers.parse("구독 실패 개수는 {expected:d} 이어야 한다"))
+def subscribe_failure_count_is(world, expected):
+    assert kw.then_subscribe_failure_count_is(world, expected)

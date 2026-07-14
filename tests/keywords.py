@@ -29,6 +29,7 @@ from thinqconnect.devices.washer import WasherDevice
 
 import my_lg
 import my_lg.climate as climate_mod
+import my_lg.coordinator_course as coordinator_course_mod
 import my_lg.sensor as sensor_mod
 from my_lg import SmartThinqHybridRuntimeData
 from my_lg.coordinator_pat import PatDeviceCoordinator
@@ -258,6 +259,73 @@ def then_pending_temperature_task_was_cancelled(world: World) -> bool:
     return task is not None and task.cancelled()
 
 
+def when_retrying_wideq_command_while_reauth_needed(world: World) -> None:
+    """Retry a wideq command while wideq_reauth_needed is already True.
+
+    Unlike when_wideq_call_succeeds, this stores any raised exception on
+    the world instead of letting it propagate, so a Then-step can assert
+    that the guard swallowed it (rather than the test itself erroring
+    out before reaching that assertion).
+    """
+
+    async def should_not_be_called():
+        raise AssertionError("wideq command should have been skipped by the guard")
+
+    try:
+        asyncio.run(
+            world.entity._async_send_wideq_command(
+                should_not_be_called, description="테스트 명령"
+            )
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_setting_fan_mode_while_reauth_needed(world: World, fan_mode: str) -> None:
+    """Call async_set_fan_mode while wideq_reauth_needed is already True.
+
+    Records the fan_mode shown *before* this call, so the Then-step can
+    confirm it's unchanged (the whole point of returning bool from
+    _async_send_wideq_command: a silently-skipped command must not be
+    treated as if it had been applied).
+    """
+    world.extra["fan_mode_before"] = world.entity.fan_mode
+    asyncio.run(world.entity.async_set_fan_mode(fan_mode))
+
+
+def then_fan_mode_unchanged(world: World) -> bool:
+    return world.entity.fan_mode == world.extra["fan_mode_before"]
+
+
+def when_setting_temperature_while_reauth_needed_and_debounce_elapses(
+    world: World, temperature: float
+) -> None:
+    """Set temperature (optimistic write happens), then let the real
+    debounce + send attempt run to completion within one event loop, so
+    the rollback (triggered by the guard skipping the actual send while
+    wideq_reauth_needed is True) can be observed synchronously.
+    """
+    world.extra["temperature_before"] = world.entity.target_temperature
+
+    async def _run():
+        world.hass.async_create_task = lambda coro: asyncio.ensure_future(coro)
+        world.entity.hass = world.hass
+        world.entity.async_write_ha_state = MagicMock()
+        await world.entity.async_set_temperature(temperature=temperature)
+        # Wait past the real debounce window so the send attempt (and,
+        # since wideq_reauth_needed is True, its resulting rollback)
+        # actually runs before this scenario inspects the result.
+        pending = world.entity._pending_temperature_task
+        if pending is not None:
+            await pending
+
+    asyncio.run(_run())
+
+
+def then_target_temperature_unchanged(world: World) -> bool:
+    return world.entity.target_temperature == world.extra["temperature_before"]
+
+
 def when_setting_hvac_mode_with_pat_not_connected(world: World) -> None:
     """Make the PAT power-off call raise NOT_CONNECTED_DEVICE, then call async_set_hvac_mode.
 
@@ -298,28 +366,6 @@ def when_wideq_call_succeeds(world: World) -> None:
     asyncio.run(
         world.entity._async_send_wideq_command(succeeding_call, description="테스트 명령")
     )
-
-
-def when_retrying_wideq_command_while_reauth_needed(world: World) -> None:
-    """Retry a wideq command while wideq_reauth_needed is already True.
-
-    Unlike when_wideq_call_succeeds, this stores any raised exception on
-    the world instead of letting it propagate, so a Then-step can assert
-    that the guard swallowed it (rather than the test itself erroring
-    out before reaching that assertion).
-    """
-
-    async def should_not_be_called():
-        raise AssertionError("wideq command should have been skipped by the guard")
-
-    try:
-        asyncio.run(
-            world.entity._async_send_wideq_command(
-                should_not_be_called, description="테스트 명령"
-            )
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        world.exception = exc
 
 
 def when_filter_poll_raises_invalid_credential(world: World) -> None:
@@ -703,5 +749,167 @@ def then_flow_unique_id_was_set_to(world: World, expected: str) -> bool:
 
 def then_flow_checked_already_configured(world: World) -> bool:
     return world.extra["flow"]._abort_if_unique_id_configured.called
+
+
+# --------------------------------------------------------------------
+# coordinator_course.py (세탁기 "현재 코스" 코디네이터) 관련 keyword
+# --------------------------------------------------------------------
+
+
+def given_washer_course_coordinator(world: World, initial_run_state: str | None) -> None:
+    """세탁기용 WasherCourseCoordinator를 만들어 world에 저장한다.
+
+    pat_run_state_getter는 world.extra["run_state_holder"]를 읽는
+    클로저로 구성한다. 이렇게 하면 이후 when_pat_washer_run_state_changes
+    에서 이 값을 바꾸고 _handle_pat_update()를 다시 호출하는 것만으로
+    "PAT 세탁기 상태가 바뀌었다"는 상황을 그대로 재현할 수 있다.
+    """
+    washer_device = given_pat_washer_device(
+        status=[
+            {
+                "runState": {"currentState": "POWER_OFF"},
+                "location": {"locationName": "MAIN"},
+            }
+        ]
+    )
+    pat_coordinator = given_pat_coordinator(world, washer_device)
+
+    world.extra["run_state_holder"] = {"value": initial_run_state}
+
+    def _get_run_state():
+        return world.extra["run_state_holder"]["value"]
+
+    # 실제 wideq WMDevice 대신, poll()만 흉내내는 가짜 객체를 사용한다.
+    # 코디네이터 로직(폴링 시작/중단, 코스 값 해석, 에러 처리)만 검증하는
+    # 것이 목적이므로, wideq 프로토콜 자체를 실제로 태울 필요는 없다.
+    wideq_device = MagicMock()
+    wideq_device.name = "테스트세탁기"
+    world.extra["wideq_washer_device"] = wideq_device
+
+    # 폴링이 시작되면 _handle_pat_update 내부에서
+    # hass.async_create_task(self.async_refresh())를 호출한다. 이
+    # 테스트에서는 "폴링이 시작됐는지" 플래그만 확인하면 되고 실제
+    # refresh 완료까지는 필요 없으므로, 생성된 코루틴을 그 자리에서
+    # 닫아서 "코루틴이 await 되지 않았다"는 경고만 방지한다.
+    world.hass.async_create_task = lambda coro: coro.close()
+
+    course_coordinator = coordinator_course_mod.WasherCourseCoordinator(
+        world.hass,
+        None,
+        wideq_device,
+        pat_coordinator,
+        _get_run_state,
+        world.runtime_data,
+    )
+    world.extra["course_coordinator"] = course_coordinator
+
+    # HA의 async_add_listener는 등록 시점에 즉시 실행되지 않고 "다음
+    # 상태 변화"부터 반응한다. 그래서 "이미 동작 중인 상태로 만들어져
+    # 있다"는 시나리오를 정확히 재현하려면, 생성 직후 한 번
+    # _handle_pat_update()를 직접 호출해서 initial_run_state를
+    # 반영시켜야 한다 (실제로는 그 다음 PAT 상태 갱신 때 반영될 것을
+    # 미리 당겨서 확인하는 셈).
+    course_coordinator._handle_pat_update()
+
+
+def when_pat_washer_run_state_changes(world: World, run_state: str) -> None:
+    """PAT 세탁기의 run_state가 바뀐 상황을 흉내내고, 코스 코디네이터가
+    이를 인지해서 폴링을 시작/중단하도록 직접 트리거한다.
+
+    _handle_pat_update는 @callback(동기 함수)이므로 asyncio.run 없이
+    바로 호출하면 된다 - 실제로도 HA가 코디네이터 리스너를 호출할 때
+    이벤트 루프 안에서 동기적으로 실행되는 방식과 동일하다.
+    """
+    world.extra["run_state_holder"]["value"] = run_state
+    world.extra["course_coordinator"]._handle_pat_update()
+
+
+def then_course_polling_is_active(world: World) -> bool:
+    return world.extra["course_coordinator"]._is_polling_active is True
+
+
+def then_course_polling_is_inactive(world: World) -> bool:
+    return world.extra["course_coordinator"]._is_polling_active is False
+
+
+def then_course_data_is(world: World, expected: str) -> bool:
+    return world.extra["course_coordinator"].data == expected
+
+
+def _run_course_update(world: World) -> None:
+    """_async_update_data()를 직접 호출하고, 결과 또는 예외를 world에 담는다.
+
+    아래 when_wideq_poll_* 함수들이 poll()의 반환값/예외만 다르게
+    설정한 뒤 이 헬퍼를 공통으로 호출하는 구조다.
+    """
+    try:
+        world.result = asyncio.run(
+            world.extra["course_coordinator"]._async_update_data()
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_wideq_poll_returns_course(
+    world: World, current_course: str, current_smartcourse: str
+) -> None:
+    """wideq poll()이 특정 course/smartcourse 값을 반환하는 상황을 만든다."""
+    fake_status = MagicMock()
+    fake_status.current_course = current_course
+    fake_status.current_smartcourse = current_smartcourse
+    world.extra["wideq_washer_device"].poll = AsyncMock(return_value=fake_status)
+    _run_course_update(world)
+
+
+def when_wideq_poll_returns_none_for_course(world: World) -> None:
+    """wideq poll()이 아무 데이터도 못 가져온(None) 상황을 만든다."""
+    world.extra["wideq_washer_device"].poll = AsyncMock(return_value=None)
+    _run_course_update(world)
+
+
+def when_wideq_poll_raises_invalid_credential_for_course(world: World) -> None:
+    """wideq poll()이 InvalidCredentialError(약관 동의/자격증명 문제)로 실패하는 상황을 만든다."""
+    world.extra["wideq_washer_device"].poll = AsyncMock(
+        side_effect=WideqInvalidCredentialError("0110")
+    )
+    _run_course_update(world)
+
+
+def when_wideq_poll_raises_generic_error_for_course(world: World) -> None:
+    """wideq poll()이 일반적인(네트워크 등) 예외로 실패하는 상황을 만든다."""
+    world.extra["wideq_washer_device"].poll = AsyncMock(
+        side_effect=RuntimeError("네트워크 오류")
+    )
+    _run_course_update(world)
+
+
+def when_course_update_attempted_while_reauth_needed(world: World) -> None:
+    """runtime_data.wideq_reauth_needed가 이미 True인 상태에서 코스 갱신을 시도한다.
+
+    가드에 걸려 wideq를 아예 호출하지 않아야 한다. poll() 안에서
+    예외를 던지는 방식으로 확인하면 그 예외가 _async_update_data의
+    범용 except Exception에 걸려 UpdateFailed로 둔갑해버려서, 가드가
+    없어져도 테스트가 (잘못) 통과하는 문제가 있었다. 그래서 호출
+    여부 자체를 별도 카운터로 추적해서, then_course_wideq_poll_not_called
+    에서 직접 확인한다.
+    """
+    world.runtime_data.wideq_reauth_needed = True
+    call_count = {"n": 0}
+    world.extra["poll_call_count"] = call_count
+
+    async def _track_call():
+        call_count["n"] += 1
+        return MagicMock()
+
+    world.extra["wideq_washer_device"].poll = _track_call
+    _run_course_update(world)
+
+
+def then_course_wideq_poll_not_called(world: World) -> bool:
+    return world.extra["poll_call_count"]["n"] == 0
+
+
+def then_course_result_equals(world: World, expected: str) -> bool:
+    return world.result == expected
 
 

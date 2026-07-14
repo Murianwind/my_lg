@@ -210,11 +210,21 @@ def given_runtime_data(world: World, wideq_client: Any = "UNSET") -> SmartThinqH
 
 
 def given_fan_swing_device(fan_speeds=None, vertical_steps=None, horizontal_steps=None):
-    """Build a fake wideq AirConditionerFanSwingDevice with configurable capabilities."""
+    """Build a fake wideq AirConditionerFanSwingDevice with configurable capabilities.
+
+    set_fan_speed/set_vertical_step_mode/set_horizontal_step_mode are
+    explicit AsyncMocks (not bare MagicMock attributes) so that
+    `await self._fan_swing_device.set_fan_speed(...)` in
+    _async_send_wideq_command actually works - a plain MagicMock
+    attribute call returns a MagicMock, which isn't awaitable.
+    """
     device = MagicMock()
     device.fan_speeds = fan_speeds or []
     device.vertical_step_modes = vertical_steps or []
     device.horizontal_step_modes = horizontal_steps or []
+    device.set_fan_speed = AsyncMock(return_value=None)
+    device.set_vertical_step_mode = AsyncMock(return_value=None)
+    device.set_horizontal_step_mode = AsyncMock(return_value=None)
     return device
 
 
@@ -1669,3 +1679,65 @@ def when_rest_fallback_raises(world: World) -> None:
         world.result = asyncio.run(world.coordinator._async_update_data())
     except Exception as exc:  # pylint: disable=broad-except
         world.exception = exc
+
+# --------------------------------------------------------------------
+# async_set_fan_mode / async_set_swing_mode의 "정상 성공" 경로 관련
+# keyword
+#
+# 지금까지 이 두 메서드는 "재인증 필요라서 스킵되는 경우"만 테스트
+# 되어 있었다. 정작 매일 실행되는 정상 성공 경로(풍속/스윙을 바꾸면
+# 화면에 그대로 반영되는지)는 한 번도 검증된 적이 없었다.
+# --------------------------------------------------------------------
+
+
+def when_setting_fan_mode(world: World, fan_mode: str) -> None:
+    """재인증 필요 상태가 아닌 정상 상태에서 async_set_fan_mode를 호출한다.
+
+    async_set_fan_mode는 성공 시 async_write_ha_state()를 호출하는데,
+    이건 보통 EntityPlatform이 엔티티를 등록할 때 부여하는 실제
+    entity_id가 필요하다. 여기서 검증하려는 건 "성공하면 _last_fan_mode
+    가 갱신되는지"이지 HA의 상태 기록 자체가 아니므로, 다른 테스트들과
+    동일하게 stub 처리한다.
+    """
+    world.entity.async_write_ha_state = MagicMock()
+    asyncio.run(world.entity.async_set_fan_mode(fan_mode))
+
+
+def when_setting_swing_mode(world: World, swing_mode: str) -> None:
+    """재인증 필요 상태가 아닌 정상 상태에서 async_set_swing_mode를 호출한다."""
+    world.entity.async_write_ha_state = MagicMock()
+    asyncio.run(world.entity.async_set_swing_mode(swing_mode))
+
+
+def then_entity_fan_mode_equals(world: World, expected: str) -> bool:
+    return world.entity.fan_mode == expected
+
+
+def then_entity_swing_mode_equals(world: World, expected: str) -> bool:
+    return world.entity.swing_mode == expected
+
+
+def then_fan_swing_device_horizontal_step_called_with(world: World, expected: str) -> bool:
+    mock_call = world.extra["fan_swing_device"].set_horizontal_step_mode
+    return mock_call.called and mock_call.call_args.args == (expected,)
+
+
+def when_wideq_session_expires_then_retry_raises_invalid_credential(world: World) -> None:
+    """wideq 세션이 만료됐다가(NotLoggedInError), refresh_auth 후 재시도한
+    호출이 이번엔 InvalidCredentialError로 실패하는 상황을 만든다.
+
+    _async_send_wideq_command의 "세션 갱신 후 재시도" 분기 안에 있는
+    InvalidCredentialError 처리(재인증 필요로 표시하고 False 반환)를
+    별도로 검증한다 - 세션 만료와 재인증 필요가 동시에 겹치는,
+    드물지만 실제로 있을 수 있는 조합이다.
+    """
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise WideqNotLoggedInError("세션 만료")
+        raise WideqInvalidCredentialError("0110")
+
+    world.entity._wideq_client.refresh_auth = AsyncMock()
+    _run_wideq_command_with_short_retry_delay(world, _flaky)

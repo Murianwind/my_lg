@@ -157,6 +157,14 @@ class SmartThinqHybridClimateEntity(
         # pending send and replace it with a new one, so only the final
         # value is actually sent to wideq.
         self._pending_temperature_task: asyncio.Task | None = None
+        # The value to restore _last_target_temperature to if the
+        # eventual wideq send for the current debounce "burst" fails or
+        # is silently skipped (e.g. wideq_reauth_needed). Captured once
+        # when a burst starts (see async_set_temperature) rather than on
+        # every call, so a mid-burst rollback lands on the last value
+        # that was actually shown before any optimistic update in this
+        # burst - not an intermediate, equally-unconfirmed one.
+        self._temperature_rollback_value: float | None = None
 
         # 0.5-degree steps require wideq (see module docstring); fall back
         # to PAT's 1-degree granularity when wideq/fan_swing_device isn't
@@ -324,6 +332,12 @@ class SmartThinqHybridClimateEntity(
         same device arrive within a few hundred milliseconds of each
         other. The PAT fallback path has no such issue (PAT tolerates
         rapid successive calls) so it is sent directly, without debounce.
+
+        If the debounced send ultimately fails or is silently skipped
+        (e.g. wideq_reauth_needed - see _async_send_wideq_command), the
+        optimistic update is rolled back to whatever was shown before
+        this debounce "burst" started, so the UI never keeps displaying
+        a value that was never actually applied to the device.
         """
         temperature = kwargs.get("temperature")
         if temperature is None:
@@ -344,11 +358,20 @@ class SmartThinqHybridClimateEntity(
             await self._async_set_temperature_via_pat(temperature, hvac_mode)
             return
 
+        if self._pending_temperature_task is not None:
+            self._pending_temperature_task.cancel()
+        else:
+            # Only remember the pre-burst value when a new burst is
+            # starting (no task already pending) - if a task IS already
+            # pending, self._temperature_rollback_value already holds
+            # the right pre-burst value from when that first call in
+            # this burst set it, and that's what should still be rolled
+            # back to if the final (this) call's send fails.
+            self._temperature_rollback_value = self._last_target_temperature
+
         self._last_target_temperature = temperature
         self.async_write_ha_state()
 
-        if self._pending_temperature_task is not None:
-            self._pending_temperature_task.cancel()
         self._pending_temperature_task = self.hass.async_create_task(
             self._async_debounced_set_temperature(temperature)
         )
@@ -378,15 +401,26 @@ class SmartThinqHybridClimateEntity(
 
         Cancellation (a newer call superseding this one) is expected and
         silently swallowed - only the final value in a burst should ever
-        reach the device.
+        reach the device, and rolling back on a mere cancellation would
+        incorrectly undo the newer call's own optimistic update.
+
+        If the send doesn't actually succeed - _async_send_wideq_command
+        returns False (silently skipped, e.g. wideq_reauth_needed) or
+        raises ServiceValidationError after exhausting its retry - the
+        optimistic UI update is rolled back to the pre-burst value so
+        the entity doesn't keep showing a target temperature that was
+        never actually applied to the device.
         """
         try:
             await asyncio.sleep(_WIDEQ_COMMAND_DEBOUNCE_SECONDS)
         except asyncio.CancelledError:
             return
 
+        self._pending_temperature_task = None
+
+        sent = False
         try:
-            await self._async_send_wideq_command(
+            sent = await self._async_send_wideq_command(
                 lambda: self._fan_swing_device.async_set_target_temperature(temperature),
                 description=f"목표 온도({temperature})",
             )
@@ -397,8 +431,22 @@ class SmartThinqHybridClimateEntity(
                 self.coordinator.device.alias,
             )
 
-    async def _async_send_wideq_command(self, retry_call, *, description: str) -> None:
+        if not sent:
+            self._last_target_temperature = self._temperature_rollback_value
+            self.async_write_ha_state()
+
+    async def _async_send_wideq_command(self, retry_call, *, description: str) -> bool:
         """Send a wideq command, retrying once after a transient failure.
+
+        Returns True only if the command was actually dispatched
+        successfully - never on a silent skip (guard already tripped,
+        NotConnectedError, InvalidCredentialError). Callers use this to
+        decide whether it's safe to reflect the change in the entity's
+        state (fan_mode/swing_mode/target_temperature all have no
+        read-back, so "did we really send it" has to come from here,
+        not from re-reading the device). A hard failure still raises
+        ServiceValidationError as before, so the caller sees a visible
+        error rather than a return value in that case.
 
         `retry_call` is a zero-argument callable returning a fresh
         coroutine, since a coroutine object can only be awaited once and
@@ -442,15 +490,15 @@ class SmartThinqHybridClimateEntity(
                 description,
                 self.coordinator.device.alias,
             )
-            return
+            return False
         try:
             await retry_call()
             self.coordinator.mark_reachable()
             self._runtime_data.mark_wideq_reauth_ok()
-            return
+            return True
         except WideqInvalidCredentialError:
             self._runtime_data.mark_wideq_reauth_needed()
-            return
+            return False
         except WideqNotConnectedError:
             _LOGGER.debug(
                 "Could not set %s for '%s': device is momentarily not "
@@ -459,7 +507,7 @@ class SmartThinqHybridClimateEntity(
                 self.coordinator.device.alias,
             )
             self.coordinator.mark_unreachable()
-            return
+            return False
         except WideqNotLoggedInError:
             _LOGGER.debug(
                 "wideq session expired while setting %s for '%s'; "
@@ -476,10 +524,10 @@ class SmartThinqHybridClimateEntity(
             try:
                 await retry_call()
                 self.coordinator.mark_reachable()
-                return
+                return True
             except WideqInvalidCredentialError:
                 self._runtime_data.mark_wideq_reauth_needed()
-                return
+                return False
             except Exception as exc:  # pylint: disable=broad-except
                 raise ServiceValidationError(
                     f"{description}을(를) 변경할 수 없습니다: {exc}"
@@ -502,10 +550,13 @@ class SmartThinqHybridClimateEntity(
             await retry_call()
             self.coordinator.mark_reachable()
             self._runtime_data.mark_wideq_reauth_ok()
+            return True
         except WideqInvalidCredentialError:
             self._runtime_data.mark_wideq_reauth_needed()
+            return False
         except WideqNotConnectedError:
             self.coordinator.mark_unreachable()
+            return False
         except Exception as exc:  # pylint: disable=broad-except
             raise ServiceValidationError(f"{description}을(를) 변경할 수 없습니다: {exc}") from exc
 
@@ -515,12 +566,13 @@ class SmartThinqHybridClimateEntity(
             raise ServiceValidationError(
                 "이 에어컨은 풍속 제어를 위한 wideq 연동이 설정되어 있지 않습니다."
             )
-        await self._async_send_wideq_command(
+        sent = await self._async_send_wideq_command(
             lambda: self._fan_swing_device.set_fan_speed(fan_mode),
             description="풍속",
         )
-        self._last_fan_mode = fan_mode
-        self.async_write_ha_state()
+        if sent:
+            self._last_fan_mode = fan_mode
+            self.async_write_ha_state()
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
         """Send a vane step command via wideq (write-only, no polling)."""
@@ -532,6 +584,7 @@ class SmartThinqHybridClimateEntity(
             send = lambda: self._fan_swing_device.set_vertical_step_mode(swing_mode)
         else:
             send = lambda: self._fan_swing_device.set_horizontal_step_mode(swing_mode)
-        await self._async_send_wideq_command(send, description="회전(스윙) 모드")
-        self._last_swing_mode = swing_mode
-        self.async_write_ha_state()
+        sent = await self._async_send_wideq_command(send, description="회전(스윙) 모드")
+        if sent:
+            self._last_swing_mode = swing_mode
+            self.async_write_ha_state()

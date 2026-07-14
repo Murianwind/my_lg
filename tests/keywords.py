@@ -25,12 +25,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.air_conditioner import AirConditionerDevice
+from thinqconnect.devices.dehumidifier import DehumidifierDevice
 from thinqconnect.devices.washer import WasherDevice
 
 import my_lg
 import my_lg.climate as climate_mod
 import my_lg.coordinator_course as coordinator_course_mod
+import my_lg.humidifier as humidifier_mod
 import my_lg.sensor as sensor_mod
+import my_lg.switch as switch_mod
 from my_lg import SmartThinqHybridRuntimeData
 from my_lg.coordinator_pat import PatDeviceCoordinator
 from my_lg.wideq.core_exceptions import InvalidCredentialError as WideqInvalidCredentialError
@@ -912,4 +915,161 @@ def then_course_wideq_poll_not_called(world: World) -> bool:
 def then_course_result_equals(world: World, expected: str) -> bool:
     return world.result == expected
 
+# --------------------------------------------------------------------
+# humidifier.py (제습기) / switch.py (에어컨 에너지 절약) 관련 keyword
+#
+# 둘 다 PatCoordinatorEntity.async_send_pat_command라는 공통 헬퍼를
+# 거치는데, 그 헬퍼 자체는 climate.py의 hvac_mode 시나리오로 이미
+# 검증했다. 여기서 확인하려는 건 "humidifier/switch가 실제로 그
+# 헬퍼를 올바른 인자로 호출하는지" - 즉 리팩터링 이후에도 이 두
+# 엔티티의 실제 동작 경로가 살아있는지 여부다.
+# --------------------------------------------------------------------
 
+
+def given_pat_dehumidifier_device(status: dict | None = None) -> DehumidifierDevice:
+    """실제 제습기 profile 구조를 흉내낸 DehumidifierDevice를 만든다."""
+    profile = {
+        "property": {
+            "dehumidifierJobMode": {
+                "currentJobMode": {
+                    "type": "enum",
+                    "mode": ["r", "w"],
+                    "value": {
+                        "r": ["SMART_HUMIDITY", "RAPID_HUMIDITY"],
+                        "w": ["SMART_HUMIDITY", "RAPID_HUMIDITY"],
+                    },
+                }
+            },
+            "operation": {
+                "dehumidifierOperationMode": {
+                    "type": "enum",
+                    "mode": ["r", "w"],
+                    "value": {"r": ["POWER_ON", "POWER_OFF"], "w": ["POWER_ON", "POWER_OFF"]},
+                }
+            },
+            "humidity": {
+                "currentHumidity": {"type": "range", "mode": ["r"]},
+                "targetHumidity": {"type": "range", "mode": ["r", "w"]},
+            },
+        }
+    }
+    device = DehumidifierDevice(
+        thinq_api=AsyncMock(),
+        device_id="dehumidifier-device-id",
+        device_type="DEVICE_DEHUMIDIFIER",
+        model_name="DH_TEST",
+        alias="테스트제습기",
+        reportable=True,
+        group_id=None,
+        profile=profile,
+    )
+    if status is not None:
+        device.update_status(status)
+    return device
+
+
+def given_dehumidifier_entity(world: World) -> None:
+    """정상 상태의 제습기 엔티티를 만들고, PAT 설정 메서드들을 AsyncMock으로 대체한다.
+
+    (climate.py의 AC 테스트와 같은 이유로) 실제 SDK의
+    profile-to-payload 인코딩까지 태우지 않고, "우리 엔티티 코드가
+    올바른 메서드를 올바른 인자로 호출하는지"만 검증한다.
+    """
+    device = given_pat_dehumidifier_device(
+        status={
+            "dehumidifierJobMode": {"currentJobMode": "SMART_HUMIDITY"},
+            "operation": {"dehumidifierOperationMode": "POWER_ON"},
+            "humidity": {"currentHumidity": 45, "targetHumidity": 40},
+        }
+    )
+    device.set_dehumidifier_operation_mode = AsyncMock()
+    device.set_current_job_mode = AsyncMock()
+    device.set_target_humidity = AsyncMock()
+    coordinator = given_pat_coordinator(world, device)
+    entity = humidifier_mod.SmartThinqHybridDehumidifierEntity(coordinator)
+    world.entity = entity
+
+
+def given_ac_energy_saving_switch_entity(world: World) -> None:
+    """정상 상태의 에너지 절약 스위치 엔티티를 만든다."""
+    device = given_pat_ac_device(
+        status={
+            "airConJobMode": {"currentJobMode": "COOL"},
+            "operation": {"airConOperationMode": "POWER_ON"},
+            "powerSave": {"powerSaveEnabled": False},
+        }
+    )
+    device.set_power_save_enabled = AsyncMock()
+    coordinator = given_pat_coordinator(world, device)
+    entity = switch_mod.AcEnergySavingSwitch(coordinator)
+    world.entity = entity
+
+
+def when_dehumidifier_action_invoked(world: World, action: str, arg: str | None = None) -> None:
+    """제습기 엔티티의 turn_on/turn_off/set_mode/set_humidity 중 하나를 직접 호출한다."""
+    entity = world.entity
+    try:
+        if action == "turn_on":
+            asyncio.run(entity.async_turn_on())
+        elif action == "turn_off":
+            asyncio.run(entity.async_turn_off())
+        elif action == "set_mode":
+            asyncio.run(entity.async_set_mode(arg))
+        elif action == "set_humidity":
+            asyncio.run(entity.async_set_humidity(int(arg)))
+        else:
+            raise ValueError(f"알 수 없는 동작: {action}")
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_dehumidifier_pat_command_fails(world: World, action: str, error_code: str) -> None:
+    """제습기의 해당 PAT 설정 메서드가 지정한 에러 코드로 실패하도록 만든 뒤 그 동작을 호출한다."""
+    method_map = {
+        "turn_on": "set_dehumidifier_operation_mode",
+        "turn_off": "set_dehumidifier_operation_mode",
+        "set_mode": "set_current_job_mode",
+        "set_humidity": "set_target_humidity",
+    }
+    method_name = method_map[action]
+    setattr(
+        world.entity.device,
+        method_name,
+        AsyncMock(side_effect=ThinQAPIException(error_code, "테스트 오류", {})),
+    )
+    when_dehumidifier_action_invoked(world, action, arg="SMART_HUMIDITY" if action == "set_mode" else "45")
+
+
+def then_dehumidifier_pat_method_called(world: World, action: str) -> bool:
+    method_map = {
+        "turn_on": ("set_dehumidifier_operation_mode", ("POWER_ON",)),
+        "turn_off": ("set_dehumidifier_operation_mode", ("POWER_OFF",)),
+    }
+    method_name, expected_args = method_map[action]
+    mock_call = getattr(world.entity.device, method_name)
+    return mock_call.called and mock_call.call_args.args == expected_args
+
+
+def when_switch_action_invoked(world: World, action: str) -> None:
+    """에너지 절약 스위치의 turn_on/turn_off를 직접 호출한다."""
+    entity = world.entity
+    try:
+        if action == "turn_on":
+            asyncio.run(entity.async_turn_on())
+        else:
+            asyncio.run(entity.async_turn_off())
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_switch_pat_command_fails(world: World, action: str, error_code: str) -> None:
+    """스위치의 set_power_save_enabled가 지정한 에러 코드로 실패하도록 만든 뒤 그 동작을 호출한다."""
+    world.entity.coordinator.device.set_power_save_enabled = AsyncMock(
+        side_effect=ThinQAPIException(error_code, "테스트 오류", {})
+    )
+    when_switch_action_invoked(world, action)
+
+
+def then_switch_power_save_called_with(world: World, expected: bool) -> bool:
+    mock_call = world.entity.coordinator.device.set_power_save_enabled
+    return mock_call.called and mock_call.call_args.args == (expected,)

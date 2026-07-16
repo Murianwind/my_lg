@@ -25,3 +25,19 @@ Feature: wideq 재인증 필요 상태 관리
     When AC 필터 조회가 InvalidCredentialError로 실패한다
     Then 예외는 UpdateFailed 이어야 한다
     And runtime_data의 재인증 필요 상태는 True 이어야 한다
+
+Scenario: 재인증이 필요해서 풍속 명령이 스킵되면 표시값이 갱신되지 않는다
+    Given 정상 상태(POWER_ON, COOL)의 에어컨 PAT 코디네이터가 있다
+    And wideq 팬/스윙 연동 기기(풍속 2단계, 수직 스텝 2단계)가 있다
+    And 이 코디네이터와 wideq 기기로 climate 엔티티를 만든다
+    And wideq 명령이 InvalidCredentialError로 실패한다
+    When 재인증이 필요한 상태에서 풍속을 SPEED_1로 설정한다
+    Then 표시되는 풍속은 변경 전 값 그대로여야 한다
+
+  Scenario: 재인증이 필요해서 온도 전송이 스킵되면 표시 온도가 원래 값으로 되돌아간다
+    Given 정상 상태(POWER_ON, COOL)의 에어컨 PAT 코디네이터가 있다
+    And wideq 팬/스윙 연동 기기(풍속 2단계, 수직 스텝 2단계)가 있다
+    And 이 코디네이터와 wideq 기기로 climate 엔티티를 만든다
+    And wideq 명령이 InvalidCredentialError로 실패한다
+    When 재인증이 필요한 상태에서 목표 온도를 24.5도로 설정하고 디바운스가 끝날 때까지 기다린다
+    Then 표시되는 목표 온도는 변경 전 값 그대로여야 한다

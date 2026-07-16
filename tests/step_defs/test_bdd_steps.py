@@ -46,6 +46,7 @@ scenarios("../features/humidifier_switch_properties.feature")
 scenarios("../features/coordinator_pat_discovery.feature")
 scenarios("../features/climate_fan_swing_success.feature")
 scenarios("../features/pat_command_retry.feature")
+scenarios("../features/pat_command_verify.feature")
 
 @pytest.fixture
 def world():
@@ -594,6 +595,24 @@ def pat_command_non_transient_error(world):
 @when("PAT 명령이 FAIL_DEVICE_CONTROL로 실패했다가 재시도에서는 기기 오프라인으로 실패한다")
 def pat_command_transient_then_not_connected(world):
     kw.when_pat_command_transient_then_not_connected(world)
+
+@when("PAT 명령이 계속 실패로 응답되지만 기기에는 이미 적용되어 있다")
+def pat_command_fails_but_device_applied(world):
+    kw.when_pat_command_fails_but_device_actually_applied_it(world)
+
+@when("PAT 명령이 계속 실패로 응답되고 기기에도 끝까지 적용되지 않는다")
+def pat_command_fails_and_never_applied(world):
+    kw.when_pat_command_fails_and_device_never_applies_it(world)
+
+
+@when("PAT 명령이 실패했지만 1차 확인 시점에 이미 적용되어 있다")
+def pat_command_confirmed_on_first_check(world):
+    kw.when_pat_command_fails_once_then_device_state_confirms_after_retry(world)
+
+
+@when("PAT 명령이 재전송되어야만 실제로 적용된다")
+def pat_command_needs_resend(world):
+    kw.when_pat_command_needs_actual_resend_to_succeed(world)  
     
 # --------------------------------------------------------------------
 # Then

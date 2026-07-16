@@ -45,6 +45,7 @@ scenarios("../features/climate_restore_state.feature")
 scenarios("../features/humidifier_switch_properties.feature")
 scenarios("../features/coordinator_pat_discovery.feature")
 scenarios("../features/climate_fan_swing_success.feature")
+scenarios("../features/pat_command_retry.feature")
 
 @pytest.fixture
 def world():
@@ -574,6 +575,25 @@ def set_swing_mode_normally(world, swing_mode):
 @when("세션 만료 후 재시도가 InvalidCredentialError로 실패한다")
 def session_expires_then_retry_raises_invalid_credential(world):
     kw.when_wideq_session_expires_then_retry_raises_invalid_credential(world)
+
+@when("PAT 명령이 FAIL_DEVICE_CONTROL로 실패했다가 재시도에서 성공한다")
+def pat_command_transient_error_then_retry_succeeds(world):
+    kw.when_pat_command_transient_error_then_retry_succeeds(world)
+
+
+@when("PAT 명령이 FAIL_DEVICE_CONTROL로 계속 실패한다")
+def pat_command_transient_error_persists(world):
+    kw.when_pat_command_transient_error_persists(world)
+
+
+@when("PAT 명령이 일시적이지 않은 에러 코드로 실패한다")
+def pat_command_non_transient_error(world):
+    kw.when_pat_command_non_transient_error(world)
+
+
+@when("PAT 명령이 FAIL_DEVICE_CONTROL로 실패했다가 재시도에서는 기기 오프라인으로 실패한다")
+def pat_command_transient_then_not_connected(world):
+    kw.when_pat_command_transient_then_not_connected(world)
     
 # --------------------------------------------------------------------
 # Then
@@ -935,6 +955,9 @@ def built_device_is_not_none(world):
 def entity_swing_mode_equals(world, expected):
     assert kw.then_entity_swing_mode_equals(world, expected)
 
+@then(parsers.parse("PAT 호출 횟수는 {expected:d} 이어야 한다"))
+def pat_call_count_is(world, expected):
+    assert kw.then_pat_call_count_is(world, expected)
 
 @then(parsers.parse('수평 스텝 메서드가 "{expected}"로 호출되어야 한다'))
 def fan_swing_device_horizontal_step_called_with(world, expected):

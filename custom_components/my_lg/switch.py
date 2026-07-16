@@ -60,11 +60,21 @@ class AcEnergySavingSwitch(PatCoordinatorEntity, SwitchEntity):
         Uses a callable `error_message` (rather than the helper's default
         "{description}을(를) 변경할 수 없습니다" template) to keep this
         entity's existing, more specific wording ("켤/끌 수 없습니다").
+
+        Passes `verify` because this command is usually the third or so
+        in a burst sent to the same AC in quick succession by an
+        automation (hvac_mode, temperature, then this) - real logs
+        showed PAT reporting FAIL_DEVICE_CONTROL for it and the device
+        still applying it roughly 2.5s later regardless. Rather than
+        trusting that error response at face value, the shared helper
+        will wait, re-check the actual device state, and only actually
+        report failure if the device truly never reached it.
         """
         state = "켤" if enabled else "끌"
         await self.async_send_pat_command(
             lambda: self.coordinator.device.set_power_save_enabled(enabled),
             error_message=lambda exc: f"에너지 절약 모드를 {state} 수 없습니다: {exc}",
+            verify=lambda: self.coordinator.get_status(Property.POWER_SAVE_ENABLED) == enabled,
         )
 
     async def async_turn_on(self, **kwargs) -> None:

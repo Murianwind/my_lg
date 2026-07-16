@@ -1741,3 +1741,91 @@ def when_wideq_session_expires_then_retry_raises_invalid_credential(world: World
 
     world.entity._wideq_client.refresh_auth = AsyncMock()
     _run_wideq_command_with_short_retry_delay(world, _flaky)
+
+# --------------------------------------------------------------------
+# coordinator_pat.py의 async_send_pat_command 일시적 에러 재시도 관련
+# keyword
+#
+# 실제로 "냉방 제어" 스크립트가 hvac_mode 변경 시
+# FAIL_DEVICE_CONTROL(2208)로 실패하는 걸 겪은 뒤 추가한 로직이다.
+# _PAT_RETRY_DELAY_SECONDS(0.6초)를 짧게 줄여서, 실제로 재시도
+# 대기를 하긴 하되 테스트가 느려지지 않게 한다.
+# --------------------------------------------------------------------
+
+
+def _run_pat_command_with_short_retry_delay(world: World, call, description: str = "테스트 명령") -> None:
+    """async_send_pat_command()를 호출한다.
+
+    이 메서드는 PatDeviceCoordinator가 아니라 PatCoordinatorEntity(엔티티
+    믹스인)에 있으므로, world.entity가 아직 없으면(이 feature의
+    시나리오들은 코디네이터만 준비해두므로) wideq 없는 climate
+    엔티티를 하나 즉석에서 만들어 사용한다 - async_send_pat_command
+    자체는 코디네이터 로직만 테스트하면 되고 어떤 PatCoordinatorEntity
+    구현체를 쓰는지는 상관없다.
+    """
+    from unittest.mock import patch
+
+    if world.entity is None:
+        when_building_climate_entity(world, None)
+
+    with patch.object(coordinator_pat_mod, "_PAT_RETRY_DELAY_SECONDS", 0.01):
+        try:
+            world.result = asyncio.run(
+                world.entity.async_send_pat_command(call, error_message=description)
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            world.exception = exc
+
+
+def when_pat_command_transient_error_then_retry_succeeds(world: World) -> None:
+    """PAT 명령이 FAIL_DEVICE_CONTROL로 실패했다가, 재시도에서 성공하는 상황을 만든다."""
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ThinQAPIException("2208", "기기 제어 실패", {})
+        return None
+
+    _run_pat_command_with_short_retry_delay(world, _flaky)
+
+
+def when_pat_command_transient_error_persists(world: World) -> None:
+    """PAT 명령이 FAIL_DEVICE_CONTROL로 실패하고, 재시도에서도 계속 실패하는 상황을 만든다."""
+
+    async def _always_fail():
+        raise ThinQAPIException("2208", "기기 제어 실패", {})
+
+    _run_pat_command_with_short_retry_delay(world, _always_fail)
+
+
+def when_pat_command_non_transient_error(world: World) -> None:
+    """PAT 명령이 일시적이지 않은 에러 코드로 실패하는 상황을 만든다 (재시도 없이 바로 실패해야 함)."""
+    call_count = {"n": 0}
+
+    async def _fail():
+        call_count["n"] += 1
+        raise ThinQAPIException("9999", "치명적 오류", {})
+
+    world.extra["pat_call_count"] = call_count
+    _run_pat_command_with_short_retry_delay(world, _fail)
+
+
+def when_pat_command_transient_then_not_connected(world: World) -> None:
+    """PAT 명령이 FAIL_DEVICE_CONTROL로 실패했다가, 재시도에서는
+    NOT_CONNECTED_DEVICE로 실패하는 상황을 만든다."""
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ThinQAPIException("2208", "기기 제어 실패", {})
+        raise ThinQAPIException(
+            ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE, "오프라인", {}
+        )
+
+    _run_pat_command_with_short_retry_delay(world, _flaky)
+
+
+def then_pat_call_count_is(world: World, expected: int) -> bool:
+    return world.extra["pat_call_count"]["n"] == expected

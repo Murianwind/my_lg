@@ -296,9 +296,15 @@ class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
         return self.coordinator.available
 
     async def async_send_pat_command(
-        self, call, *, error_message: str | Callable[[Exception], str]
+        self,
+        call,
+        *,
+        error_message: str | Callable[[Exception], str],
+        verify: Callable[[], bool] | None = None,
+        verify_delay_seconds: float = 3.0,
+        max_verify_attempts: int = 2,
     ) -> None:
-        """Send a PAT command, retrying once after a transient failure.
+        """Send a PAT command, retrying after a transient failure.
 
         `call` is a zero-argument callable returning a fresh coroutine
         each time it's invoked (a coroutine object can only be awaited
@@ -311,19 +317,36 @@ class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
         and returns quietly rather than raising a visible error - the
         device being briefly offline isn't something the user needs an
         error popup for, and retrying it is pointless since being
-        offline won't resolve itself in 0.6s.
+        offline won't resolve itself in a few seconds.
 
-        A code in _PAT_TRANSIENT_RESULT_CODES (e.g. FAIL_DEVICE_CONTROL,
-        seen in real logs when an automation's hvac_mode change landed
-        while the device was still processing a previous command) is
-        retried once after _PAT_RETRY_DELAY_SECONDS - logged at debug
-        level, not raised, so a command that only needed one retry never
-        shows up as a visible automation/script error. If the retry
-        also fails, the resulting exception (whatever it is) is what
-        gets surfaced to the caller.
+        A code in _PAT_TRANSIENT_RESULT_CODES (e.g. FAIL_DEVICE_CONTROL)
+        means the device was busy processing a previous command, not
+        that this one was rejected outright. Two behaviors are
+        supported for this case, chosen by whether `verify` is given:
 
-        Any other PAT error is surfaced immediately as a
-        ServiceValidationError, with no retry.
+        Without `verify` (the default - used by callers like hvac_mode/
+        temperature where a fast response matters more than certainty):
+        retried once after _PAT_RETRY_DELAY_SECONDS (0.6s), based purely
+        on whether the retried API call itself raises. This is the
+        original, lower-latency behavior.
+
+        With `verify` (a zero-argument callable returning whether the
+        device has actually reached the desired state - used for
+        callers like switch.py's energy-saving toggle, where being
+        correct matters more than being fast): real logs showed the
+        device can still apply a command ~2.5s after PAT reported
+        FAIL_DEVICE_CONTROL for it - the API's failure response does
+        not reliably mean the command was discarded. So instead of a
+        short retry keyed only on the API's response, this waits
+        `verify_delay_seconds`, refreshes the coordinator, and checks
+        `verify()` against the real device state; if it already
+        succeeded despite the error, this returns quietly without ever
+        raising. If not yet applied, the command is sent again (up to
+        `max_verify_attempts` additional attempts) before finally
+        raising ServiceValidationError.
+
+        Any non-transient PAT error is surfaced immediately as a
+        ServiceValidationError, with no retry, in either mode.
 
         `error_message` is either a plain description (used to build
         "{description}을(를) 변경할 수 없습니다: {exc}", the wording used
@@ -338,19 +361,32 @@ class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
                 message = f"{error_message}을(를) 변경할 수 없습니다: {exc}"
             raise ServiceValidationError(message) from exc
 
-        try:
-            await call()
-        except ThinQAPIException as exc:
-            if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
-                _LOGGER.debug(
-                    "PAT command skipped for '%s': device is momentarily "
-                    "not connected to the cloud",
-                    self.coordinator.device.alias,
-                )
-                self.coordinator.mark_unreachable()
+        async def _attempt() -> ThinQAPIException | None:
+            """Send the command once. Returns the transient exception hit,
+            if any; returns (via early function return) immediately for
+            success or for a non-retryable outcome."""
+            try:
+                await call()
+            except ThinQAPIException as exc:
+                if exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                    _LOGGER.debug(
+                        "PAT command skipped for '%s': device is momentarily "
+                        "not connected to the cloud",
+                        self.coordinator.device.alias,
+                    )
+                    self.coordinator.mark_unreachable()
+                    return None
+                if exc.code not in _PAT_TRANSIENT_RESULT_CODES:
+                    _raise_as_service_validation_error(exc)
+                return exc
+            self.coordinator.mark_reachable()
+            await self.coordinator.async_request_refresh()
+            return None
+
+        if verify is None:
+            exc = await _attempt()
+            if exc is None:
                 return
-            if exc.code not in _PAT_TRANSIENT_RESULT_CODES:
-                _raise_as_service_validation_error(exc)
             _LOGGER.debug(
                 "Transient PAT error (%s) for '%s'; retrying in %ss",
                 exc.code,
@@ -367,5 +403,38 @@ class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
                 _raise_as_service_validation_error(retry_exc)
             except Exception as retry_exc:  # pylint: disable=broad-except
                 _raise_as_service_validation_error(retry_exc)
-        self.coordinator.mark_reachable()
-        await self.coordinator.async_request_refresh()
+            self.coordinator.mark_reachable()
+            await self.coordinator.async_request_refresh()
+            return
+
+        # verify path: wait for the device's real state instead of
+        # trusting a transient-error response, and only re-send the
+        # command (rather than polling in place) if it truly hasn't
+        # taken effect yet.
+        last_exc: ThinQAPIException | None = None
+        for attempt in range(max_verify_attempts + 1):
+            exc = await _attempt()
+            if exc is None:
+                return  # success (or NOT_CONNECTED_DEVICE, already handled)
+            last_exc = exc
+            await asyncio.sleep(verify_delay_seconds)
+            await self.coordinator.async_request_refresh()
+            if verify():
+                _LOGGER.debug(
+                    "PAT command for '%s' had reported %s but the device "
+                    "state confirms it actually succeeded",
+                    self.coordinator.device.alias,
+                    exc.code,
+                )
+                self.coordinator.mark_reachable()
+                return
+            if attempt < max_verify_attempts:
+                _LOGGER.debug(
+                    "Transient PAT error (%s) for '%s' and device state "
+                    "not yet updated; resending (attempt %s/%s)",
+                    exc.code,
+                    self.coordinator.device.alias,
+                    attempt + 2,
+                    max_verify_attempts + 1,
+                )
+        _raise_as_service_validation_error(last_exc)

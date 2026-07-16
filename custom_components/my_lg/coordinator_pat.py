@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import timedelta
 import logging
+import asyncio
 
 from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 from thinqconnect.devices.air_conditioner import AirConditionerDevice
@@ -40,6 +41,25 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# PAT error codes observed (or documented) to mean "the device was
+# momentarily busy processing a previous command" rather than a real
+# rejection of this command - retrying once after a short delay clears
+# these in practice. Modeled on the same pattern already used for
+# wideq's _WIDEQ_TRANSIENT_RESULT_CODES: FAIL_DEVICE_CONTROL (2208) was
+# seen in real logs when a hvac_mode change landed while the device was
+# still processing an automation's previous command to it; the other
+# three (DEVICE_RESPONSE_DELAY, RETRY_REQUEST, SYNCING) describe the
+# same "busy right now, try again" situation by name.
+_PAT_TRANSIENT_RESULT_CODES = {
+    ThinQAPIErrorCodes.FAIL_DEVICE_CONTROL,
+    ThinQAPIErrorCodes.DEVICE_RESPONSE_DELAY,
+    ThinQAPIErrorCodes.RETRY_REQUEST,
+    ThinQAPIErrorCodes.SYNCING,
+}
+
+# How long to wait before a single retry after a transient PAT failure.
+_PAT_RETRY_DELAY_SECONDS = 0.6
 
 _DEVICE_CLASS_MAP = {
     PAT_DEVICE_TYPE_AC: AirConditionerDevice,
@@ -278,25 +298,46 @@ class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
     async def async_send_pat_command(
         self, call, *, error_message: str | Callable[[Exception], str]
     ) -> None:
-        """Send a PAT command, handling NOT_CONNECTED_DEVICE uniformly.
+        """Send a PAT command, retrying once after a transient failure.
 
-        This is the one shared implementation of a pattern that used to
-        be copy-pasted (with slightly different wording each time) in
-        humidifier.py, switch.py, and twice in climate.py: on
-        NOT_CONNECTED_DEVICE, mark the coordinator unreachable (which
-        immediately flips `available` for every entity backed by it) and
-        return quietly - the device being briefly offline isn't
-        something the user needs an error popup for. Any other PAT
-        error is surfaced as a ServiceValidationError. On success, marks
-        the coordinator reachable again and requests a refresh so the
-        new state shows up promptly instead of waiting for the next
-        push/poll.
+        `call` is a zero-argument callable returning a fresh coroutine
+        each time it's invoked (a coroutine object can only be awaited
+        once, so a retry needs to issue the command again from scratch)
+        - matches how every call site already passes it (a local
+        `async def` or a `lambda: self.device.set_x(...)`).
+
+        NOT_CONNECTED_DEVICE marks the coordinator unreachable (which
+        immediately flips `available` for every entity backed by it)
+        and returns quietly rather than raising a visible error - the
+        device being briefly offline isn't something the user needs an
+        error popup for, and retrying it is pointless since being
+        offline won't resolve itself in 0.6s.
+
+        A code in _PAT_TRANSIENT_RESULT_CODES (e.g. FAIL_DEVICE_CONTROL,
+        seen in real logs when an automation's hvac_mode change landed
+        while the device was still processing a previous command) is
+        retried once after _PAT_RETRY_DELAY_SECONDS - logged at debug
+        level, not raised, so a command that only needed one retry never
+        shows up as a visible automation/script error. If the retry
+        also fails, the resulting exception (whatever it is) is what
+        gets surfaced to the caller.
+
+        Any other PAT error is surfaced immediately as a
+        ServiceValidationError, with no retry.
 
         `error_message` is either a plain description (used to build
         "{description}을(를) 변경할 수 없습니다: {exc}", the wording used
         by most call sites) or a callable `(exc) -> str` for a site that
         needs different phrasing (e.g. switch.py's "켤/끌 수 없습니다").
         """
+
+        def _raise_as_service_validation_error(exc: Exception) -> None:
+            if callable(error_message):
+                message = error_message(exc)
+            else:
+                message = f"{error_message}을(를) 변경할 수 없습니다: {exc}"
+            raise ServiceValidationError(message) from exc
+
         try:
             await call()
         except ThinQAPIException as exc:
@@ -308,10 +349,23 @@ class PatCoordinatorEntity(CoordinatorEntity[PatDeviceCoordinator]):
                 )
                 self.coordinator.mark_unreachable()
                 return
-            if callable(error_message):
-                message = error_message(exc)
-            else:
-                message = f"{error_message}을(를) 변경할 수 없습니다: {exc}"
-            raise ServiceValidationError(message) from exc
+            if exc.code not in _PAT_TRANSIENT_RESULT_CODES:
+                _raise_as_service_validation_error(exc)
+            _LOGGER.debug(
+                "Transient PAT error (%s) for '%s'; retrying in %ss",
+                exc.code,
+                self.coordinator.device.alias,
+                _PAT_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(_PAT_RETRY_DELAY_SECONDS)
+            try:
+                await call()
+            except ThinQAPIException as retry_exc:
+                if retry_exc.code == ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE:
+                    self.coordinator.mark_unreachable()
+                    return
+                _raise_as_service_validation_error(retry_exc)
+            except Exception as retry_exc:  # pylint: disable=broad-except
+                _raise_as_service_validation_error(retry_exc)
         self.coordinator.mark_reachable()
         await self.coordinator.async_request_refresh()

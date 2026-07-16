@@ -1829,3 +1829,78 @@ def when_pat_command_transient_then_not_connected(world: World) -> None:
 
 def then_pat_call_count_is(world: World, expected: int) -> bool:
     return world.extra["pat_call_count"]["n"] == expected
+
+# --------------------------------------------------------------------
+# async_send_pat_command의 verify(실제 상태 확인 후 판단) 경로 관련
+# keyword
+#
+# 실제 로그에서, PAT가 FAIL_DEVICE_CONTROL로 실패했다고 응답한 명령이
+# 약 2.5초 뒤 기기에 실제로 적용된 사례가 확인됐다. verify를 넘긴
+# 호출부는 API 응답만 믿지 않고, 지연 후 실제 기기 상태를 다시 읽어서
+# 판단한다.
+# --------------------------------------------------------------------
+
+
+def _run_pat_command_with_verify(
+    world: World, call, verify, verify_delay_seconds: float = 0.01
+) -> None:
+    """verify 재확인 대기 시간을 짧게 줄여서 async_send_pat_command(verify=...)를 호출한다."""
+    if world.entity is None:
+        when_building_climate_entity(world, None)
+    try:
+        world.result = asyncio.run(
+            world.entity.async_send_pat_command(
+                call,
+                error_message="테스트 명령",
+                verify=verify,
+                verify_delay_seconds=verify_delay_seconds,
+            )
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+
+
+def when_pat_command_fails_but_device_actually_applied_it(world: World) -> None:
+    """PAT가 FAIL_DEVICE_CONTROL로 계속 실패를 응답하지만, 실제로는(verify 기준)
+    기기가 이미 명령을 적용해놓은 상황을 만든다."""
+
+    async def _always_reports_failure():
+        raise ThinQAPIException("2208", "기기 제어 실패", {})
+
+    _run_pat_command_with_verify(world, _always_reports_failure, verify=lambda: True)
+
+
+def when_pat_command_fails_and_device_never_applies_it(world: World) -> None:
+    """PAT가 FAIL_DEVICE_CONTROL로 계속 실패하고, 실제로도(verify 기준)
+    끝까지 적용되지 않는 상황을 만든다."""
+
+    async def _always_reports_failure():
+        raise ThinQAPIException("2208", "기기 제어 실패", {})
+
+    _run_pat_command_with_verify(world, _always_reports_failure, verify=lambda: False)
+
+
+def when_pat_command_fails_once_then_device_state_confirms_after_retry(world: World) -> None:
+    """PAT가 첫 시도에서 실패를 응답하지만, verify 재확인 시점엔 이미
+    적용되어 있어서 재전송 없이 그대로 성공 처리되는 상황을 만든다."""
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        raise ThinQAPIException("2208", "기기 제어 실패", {})
+
+    world.extra["pat_call_count"] = call_count
+    _run_pat_command_with_verify(world, _flaky, verify=lambda: call_count["n"] >= 1)
+
+
+def when_pat_command_needs_actual_resend_to_succeed(world: World) -> None:
+    """1차 시도까지는 verify로도 확인이 안 되고, 명령을 다시 보낸 뒤에야
+    (2차 시도) 실제로 적용되는 상황을 만든다."""
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        raise ThinQAPIException("2208", "기기 제어 실패", {})
+
+    world.extra["pat_call_count"] = call_count
+    _run_pat_command_with_verify(world, _flaky, verify=lambda: call_count["n"] >= 2)

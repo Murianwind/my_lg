@@ -621,6 +621,10 @@ def pat_command_needs_resend(world):
 @when("이 에어컨의 hvac_mode를 냉방으로 설정한다")
 def setting_hvac_mode_to_cool(world):
     kw.when_setting_hvac_mode_to_cool(world)
+
+@when("PAT 명령이 COMMAND_NOT_SUPPORTED_IN_POWER_OFF로 실패했다가 재시도에서 성공한다")
+def pat_command_command_not_supported_then_retry_succeeds(world):
+    kw.when_pat_command_fails_with_command_not_supported_in_power_off_then_retry_succeeds(world)
     
 # --------------------------------------------------------------------
 # Then

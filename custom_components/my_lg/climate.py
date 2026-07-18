@@ -92,14 +92,15 @@ _WIDEQ_COMMAND_DEBOUNCE_SECONDS = 0.4
 
 # How long to wait before a single retry after a transient wideq failure.
 _WIDEQ_RETRY_DELAY_SECONDS = 0.6
+
 # How long to wait after sending power-on before sending the job-mode
 # change, when turning on from off. Real logs showed the PAT server
 # reject the job-mode change with COMMAND_NOT_SUPPORTED_IN_POWER_OFF
 # even when both fields were sent together in one request - it appears
-# to validate job-mode against the device's *current* power state
-# before this request lands, not the state requested within it. So the
-# two calls are deliberately spaced apart instead, giving the server
-# time to actually register power-on first.
+# to validate job-mode against the device's state *before* this
+# request lands, not the state requested within it. So the two calls
+# are deliberately spaced apart instead, giving the server time to
+# actually register power-on first.
 _POWER_ON_SETTLE_SECONDS = 2.0
 
 # How long hvac_mode reports the just-requested mode optimistically
@@ -109,6 +110,7 @@ _POWER_ON_SETTLE_SECONDS = 2.0
 # in case a retry was needed, since operation_mode and job_mode can
 # read inconsistently with each other for that whole span.
 _HVAC_MODE_OPTIMISTIC_WINDOW_SECONDS = 6.0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -168,6 +170,15 @@ class SmartThinqHybridClimateEntity(
         self._last_fan_mode: str | None = None
         self._last_swing_mode: str | None = None
         self._last_target_temperature: float | None = None
+
+        # hvac_mode is normally computed live from PAT fields (unlike
+        # fan/swing/temperature above, which are pure write-only
+        # optimistic caches) - see hvac_mode's docstring for why this
+        # short-lived optimistic override exists: it bridges the real
+        # gap between operation_mode and job_mode updating via separate
+        # MQTT pushes a moment apart while powering on.
+        self._last_hvac_mode: HVACMode | None = None
+        self._hvac_mode_optimistic_until: float = 0.0
 
         # Debounce handle for async_set_temperature: rapid repeated calls
         # (slider drags, automations re-triggering quickly) cancel any
@@ -266,7 +277,23 @@ class SmartThinqHybridClimateEntity(
 
     @property
     def hvac_mode(self) -> HVACMode | None:
-        """Return the current hvac mode."""
+        """Return the current hvac mode.
+
+        Normally computed live from two separate PAT fields
+        (operation_mode + job_mode - see async_set_hvac_mode's docstring
+        for why powering on needs both). For a short window right after
+        we ourselves requested a mode change, this instead returns the
+        requested mode optimistically: real logs showed operation_mode
+        and job_mode updating via separate MQTT pushes a moment apart,
+        during which the live combination could momentarily compute a
+        value that was never actually requested (e.g. a real observed
+        off -> fan_only -> cool blip while turning on to cool). Once the
+        window passes, this reverts to the live combination as normal,
+        so a change made from the LG app or a physical remote is still
+        picked up correctly.
+        """
+        if time.monotonic() < self._hvac_mode_optimistic_until:
+            return self._last_hvac_mode
         operation_mode = self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE)
         if operation_mode == "POWER_OFF":
             return HVACMode.OFF
@@ -307,20 +334,32 @@ class SmartThinqHybridClimateEntity(
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the hvac mode via the PAT API.
 
-        When turning on from OFF, power and job mode are sent together
-        in a single `do_multi_attribute_command` call rather than two
-        sequential `await`s (set_air_con_operation_mode then
-        set_current_job_mode). Sending them sequentially left a real,
-        observed gap: MQTT can push the confirmation for the first call
-        (operation -> POWER_ON) before the second call's confirmation
-        (job mode -> e.g. COOL) arrives. In that window,
-        `hvac_mode` reads operation as "on" but job_mode is still
-        whatever it was cached as *before* the device was turned off
-        (e.g. "FAN", left over from an auto-dry cycle) - which computes
-        as HVACMode.FAN_ONLY, producing a real, logged
-        off -> fan_only -> cool blip in climate.eeokeon's own state
-        history. Sending both properties in one PAT request means both
-        land in the same response/push, closing that window entirely.
+        When turning on from OFF, the PAT server was observed (in real
+        logs) to reject the job-mode change with
+        COMMAND_NOT_SUPPORTED_IN_POWER_OFF (2304) even when power-on and
+        job-mode were sent together in a single do_multi_attribute_command
+        request - the server appears to validate the job-mode field
+        against the device's *current* power state rather than the
+        state requested in the same call. So this sends power-on first,
+        waits _POWER_ON_SETTLE_SECONDS for the server to actually
+        register it, and only then sends the job-mode change - restoring
+        the two-step sequence, but with a deliberate pause instead of
+        firing both back-to-back.
+
+        That two-step sequence reintroduces the *other* real problem
+        this used to have: operation_mode and job_mode arrive via
+        separate MQTT pushes, so between the two calls there's a window
+        where `hvac_mode`'s live combination of both fields can read a
+        value that was never actually requested (e.g. a real observed
+        off -> fan_only -> cool blip, from job_mode still holding its
+        pre-off value like "FAN" for a moment after operation_mode
+        already reads "on"). Rather than solving that via the PAT
+        request shape (which the 2304 error shows doesn't work here),
+        it's solved on the read side: hvac_mode optimistically reports
+        exactly the mode requested here for _HVAC_MODE_OPTIMISTIC_WINDOW_SECONDS
+        after this call, then reverts to computing live from PAT fields
+        as normal (so an external change, e.g. from the LG app, is still
+        picked up correctly afterward).
         """
         if hvac_mode == HVACMode.OFF:
 
@@ -337,16 +376,23 @@ class SmartThinqHybridClimateEntity(
 
             async def _send_command() -> None:
                 if self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE) == "POWER_OFF":
-                    await self.device.do_multi_attribute_command(
-                        {
-                            Property.AIR_CON_OPERATION_MODE: "POWER_ON",
-                            Property.CURRENT_JOB_MODE: pat_mode,
-                        }
-                    )
-                else:
-                    await self.device.set_current_job_mode(pat_mode)
+                    await self.device.set_air_con_operation_mode("POWER_ON")
+                    await asyncio.sleep(_POWER_ON_SETTLE_SECONDS)
+                await self.device.set_current_job_mode(pat_mode)
 
-        await self.async_send_pat_command(_send_command, error_message="에어컨 모드")
+        self._last_hvac_mode = hvac_mode
+        self._hvac_mode_optimistic_until = time.monotonic() + _HVAC_MODE_OPTIMISTIC_WINDOW_SECONDS
+        self.async_write_ha_state()
+        try:
+            await self.async_send_pat_command(_send_command, error_message="에어컨 모드")
+        except Exception:
+            # The requested mode never actually landed - stop showing it
+            # optimistically and fall back to whatever the live PAT
+            # fields say right now, rather than keeping a known-wrong
+            # value displayed for the rest of the optimistic window.
+            self._hvac_mode_optimistic_until = 0.0
+            self.async_write_ha_state()
+            raise
 
     async def async_set_temperature(self, **kwargs) -> None:
         """Set the target temperature.

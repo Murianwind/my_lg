@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from thinqconnect.devices.air_conditioner import AirConditionerDevice
 from thinqconnect.devices.const import Property
@@ -91,7 +92,23 @@ _WIDEQ_COMMAND_DEBOUNCE_SECONDS = 0.4
 
 # How long to wait before a single retry after a transient wideq failure.
 _WIDEQ_RETRY_DELAY_SECONDS = 0.6
+# How long to wait after sending power-on before sending the job-mode
+# change, when turning on from off. Real logs showed the PAT server
+# reject the job-mode change with COMMAND_NOT_SUPPORTED_IN_POWER_OFF
+# even when both fields were sent together in one request - it appears
+# to validate job-mode against the device's *current* power state
+# before this request lands, not the state requested within it. So the
+# two calls are deliberately spaced apart instead, giving the server
+# time to actually register power-on first.
+_POWER_ON_SETTLE_SECONDS = 2.0
 
+# How long hvac_mode reports the just-requested mode optimistically
+# after async_set_hvac_mode, before reverting to computing it live from
+# PAT fields. Needs to comfortably cover _POWER_ON_SETTLE_SECONDS plus
+# the two PAT round trips plus _PAT_RETRY_DELAY_SECONDS'th of headroom
+# in case a retry was needed, since operation_mode and job_mode can
+# read inconsistently with each other for that whole span.
+_HVAC_MODE_OPTIMISTIC_WINDOW_SECONDS = 6.0
 
 async def async_setup_entry(
     hass: HomeAssistant,

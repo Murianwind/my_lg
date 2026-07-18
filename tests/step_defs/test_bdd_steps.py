@@ -47,6 +47,7 @@ scenarios("../features/coordinator_pat_discovery.feature")
 scenarios("../features/climate_fan_swing_success.feature")
 scenarios("../features/pat_command_retry.feature")
 scenarios("../features/pat_command_verify.feature")
+scenarios("../features/climate_atomic_power_on.feature")
 
 @pytest.fixture
 def world():
@@ -227,7 +228,10 @@ def given_washer_course_setup_matching_alias(world):
     washer_info = kw.given_wideq_device_info(WideqDeviceType.WASHER, "테스트세탁기")
     kw.given_washer_course_sensor_setup(world, wideq_devices=[washer_info])
 
-
+@given("전원이 꺼져 있고 이전 모드가 송풍(FAN)으로 남아있는 에어컨 코디네이터가 있다")
+def given_ac_coordinator_powered_off_with_stale_fan_mode(world):
+    kw.given_ac_coordinator_powered_off_with_stale_fan_mode(world)
+    
 # --------------------------------------------------------------------
 # When
 # --------------------------------------------------------------------
@@ -613,6 +617,10 @@ def pat_command_confirmed_on_first_check(world):
 @when("PAT 명령이 재전송되어야만 실제로 적용된다")
 def pat_command_needs_resend(world):
     kw.when_pat_command_needs_actual_resend_to_succeed(world)  
+
+@when("이 에어컨의 hvac_mode를 냉방으로 설정한다")
+def setting_hvac_mode_to_cool(world):
+    kw.when_setting_hvac_mode_to_cool(world)
     
 # --------------------------------------------------------------------
 # Then
@@ -981,3 +989,12 @@ def pat_call_count_is(world, expected):
 @then(parsers.parse('수평 스텝 메서드가 "{expected}"로 호출되어야 한다'))
 def fan_swing_device_horizontal_step_called_with(world, expected):
     assert kw.then_fan_swing_device_horizontal_step_called_with(world, expected)
+
+@then("전원과 모드가 하나의 명령으로 함께 전송되어야 한다")
+def power_and_job_mode_sent_atomically(world):
+    assert kw.then_power_and_job_mode_sent_atomically(world)
+
+
+@then("예전처럼 전원과 모드를 따로 호출하지 않아야 한다")
+def separate_power_and_mode_calls_not_used(world):
+    assert kw.then_separate_power_and_mode_calls_not_used(world)

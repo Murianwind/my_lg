@@ -49,6 +49,7 @@ scenarios("../features/pat_command_retry.feature")
 scenarios("../features/pat_command_verify.feature")
 scenarios("../features/climate_atomic_power_on.feature")
 
+
 @pytest.fixture
 def world():
     """Fresh scenario context, and MQTT event-loop cleanup afterward."""
@@ -99,12 +100,14 @@ def given_fan_swing_device(world, n1, n2):
         vertical_steps=[f"STEP_{i}" for i in range(n2)],
     )
 
+
 @given(parsers.parse("wideq 수평 스텝 전용 팬/스윙 연동 기기(풍속 {n1:d}단계, 수평 스텝 {n2:d}단계)가 있다"))
 def given_horizontal_only_fan_swing_device(world, n1, n2):
     world.extra["fan_swing_device"] = kw.given_fan_swing_device(
         fan_speeds=[f"SPEED_{i}" for i in range(n1)],
         horizontal_steps=[f"HSTEP_{i}" for i in range(n2)],
     )
+
 
 @given("이 코디네이터와 wideq 기기로 climate 엔티티를 만든다")
 @when("이 코디네이터와 wideq 기기로 climate 엔티티를 만든다")
@@ -181,6 +184,11 @@ def given_wideq_reauth_sensor(world):
     kw.given_wideq_reauth_sensor(world)
 
 
+@given("전원이 꺼져 있고 이전 모드가 송풍(FAN)으로 남아있는 에어컨 코디네이터가 있다")
+def given_ac_coordinator_powered_off_with_stale_fan_mode(world):
+    kw.given_ac_coordinator_powered_off_with_stale_fan_mode(world)
+
+
 @given("기기 목록 없이 MQTT 매니저가 있다")
 def given_mqtt_manager_no_devices(world):
     kw.given_mqtt_manager(world)
@@ -228,10 +236,7 @@ def given_washer_course_setup_matching_alias(world):
     washer_info = kw.given_wideq_device_info(WideqDeviceType.WASHER, "테스트세탁기")
     kw.given_washer_course_sensor_setup(world, wideq_devices=[washer_info])
 
-@given("전원이 꺼져 있고 이전 모드가 송풍(FAN)으로 남아있는 에어컨 코디네이터가 있다")
-def given_ac_coordinator_powered_off_with_stale_fan_mode(world):
-    kw.given_ac_coordinator_powered_off_with_stale_fan_mode(world)
-    
+
 # --------------------------------------------------------------------
 # When
 # --------------------------------------------------------------------
@@ -507,6 +512,7 @@ def build_washer_course_sensor_load_failure(world):
 def build_washer_course_sensor_load_error(world):
     kw.when_building_washer_course_sensor(world, init_device_info_result="error")
 
+
 @when(parsers.parse('이전 상태(풍속 {fan_mode}, 스윙 {swing_mode}, 온도 {temperature})로 복원된다'))
 def entity_restored_with_last_state(world, fan_mode, swing_mode, temperature):
     kw.when_entity_restored_with_last_state(
@@ -567,6 +573,7 @@ def rest_fallback_empty(world):
 def rest_fallback_raises(world):
     kw.when_rest_fallback_raises(world)
 
+
 @when(parsers.parse('풍속을 "{fan_mode}"로 정상 설정한다'))
 def set_fan_mode_normally(world, fan_mode):
     kw.when_setting_fan_mode(world, fan_mode)
@@ -580,6 +587,7 @@ def set_swing_mode_normally(world, swing_mode):
 @when("세션 만료 후 재시도가 InvalidCredentialError로 실패한다")
 def session_expires_then_retry_raises_invalid_credential(world):
     kw.when_wideq_session_expires_then_retry_raises_invalid_credential(world)
+
 
 @when("PAT 명령이 FAIL_DEVICE_CONTROL로 실패했다가 재시도에서 성공한다")
 def pat_command_transient_error_then_retry_succeeds(world):
@@ -600,9 +608,16 @@ def pat_command_non_transient_error(world):
 def pat_command_transient_then_not_connected(world):
     kw.when_pat_command_transient_then_not_connected(world)
 
+
+@when("PAT 명령이 COMMAND_NOT_SUPPORTED_IN_POWER_OFF로 실패했다가 재시도에서 성공한다")
+def pat_command_command_not_supported_then_retry_succeeds(world):
+    kw.when_pat_command_fails_with_command_not_supported_in_power_off_then_retry_succeeds(world)
+
+
 @when("PAT 명령이 계속 실패로 응답되지만 기기에는 이미 적용되어 있다")
 def pat_command_fails_but_device_applied(world):
     kw.when_pat_command_fails_but_device_actually_applied_it(world)
+
 
 @when("PAT 명령이 계속 실패로 응답되고 기기에도 끝까지 적용되지 않는다")
 def pat_command_fails_and_never_applied(world):
@@ -616,16 +631,29 @@ def pat_command_confirmed_on_first_check(world):
 
 @when("PAT 명령이 재전송되어야만 실제로 적용된다")
 def pat_command_needs_resend(world):
-    kw.when_pat_command_needs_actual_resend_to_succeed(world)  
+    kw.when_pat_command_needs_actual_resend_to_succeed(world)
+
 
 @when("이 에어컨의 hvac_mode를 냉방으로 설정한다")
 def setting_hvac_mode_to_cool(world):
     kw.when_setting_hvac_mode_to_cool(world)
 
-@when("PAT 명령이 COMMAND_NOT_SUPPORTED_IN_POWER_OFF로 실패했다가 재시도에서 성공한다")
-def pat_command_command_not_supported_then_retry_succeeds(world):
-    kw.when_pat_command_fails_with_command_not_supported_in_power_off_then_retry_succeeds(world)
-    
+
+@when("이미 켜져 있는 상태에서 hvac_mode를 다른 모드로 바꾼다")
+def setting_hvac_mode_while_already_on(world):
+    kw.when_setting_hvac_mode_while_already_on(world)
+
+
+@when("이 시점에 hvac_mode를 읽는다")
+def hvac_mode_read_during_pending_window(world):
+    kw.when_hvac_mode_read_during_pending_window(world)
+
+
+@when("hvac_mode 변경을 시도했지만 최종적으로 실패한다")
+def hvac_mode_set_but_command_ultimately_fails(world):
+    kw.when_hvac_mode_set_but_command_ultimately_fails(world)
+
+
 # --------------------------------------------------------------------
 # Then
 # --------------------------------------------------------------------
@@ -902,6 +930,7 @@ def course_sensor_is_not_none(world):
 def washer_wideq_device_registered(world):
     assert kw.then_washer_wideq_device_registered(world)
 
+
 @then(parsers.parse('복원된 풍속은 "{expected}" 이어야 한다'))
 def entity_fan_mode_is(world, expected):
     assert kw.then_entity_fan_mode_is(world, expected)
@@ -982,23 +1011,32 @@ def built_device_is_none(world):
 def built_device_is_not_none(world):
     assert kw.then_built_device_is_not_none(world)
 
+
 @then(parsers.parse('표시되는 스윙 모드는 "{expected}" 이어야 한다'))
 def entity_swing_mode_equals(world, expected):
     assert kw.then_entity_swing_mode_equals(world, expected)
 
-@then(parsers.parse("PAT 호출 횟수는 {expected:d} 이어야 한다"))
-def pat_call_count_is(world, expected):
-    assert kw.then_pat_call_count_is(world, expected)
 
 @then(parsers.parse('수평 스텝 메서드가 "{expected}"로 호출되어야 한다'))
 def fan_swing_device_horizontal_step_called_with(world, expected):
     assert kw.then_fan_swing_device_horizontal_step_called_with(world, expected)
 
-@then("전원과 모드가 하나의 명령으로 함께 전송되어야 한다")
-def power_and_job_mode_sent_atomically(world):
-    assert kw.then_power_and_job_mode_sent_atomically(world)
+
+@then(parsers.parse("PAT 호출 횟수는 {expected:d} 이어야 한다"))
+def pat_call_count_is(world, expected):
+    assert kw.then_pat_call_count_is(world, expected)
 
 
-@then("예전처럼 전원과 모드를 따로 호출하지 않아야 한다")
-def separate_power_and_mode_calls_not_used(world):
-    assert kw.then_separate_power_and_mode_calls_not_used(world)
+@then("전원 켜기와 모드 전환이 각각 순차적으로 전송되어야 한다")
+def power_on_sent_before_job_mode(world):
+    assert kw.then_power_on_sent_before_job_mode(world)
+
+
+@then("전원 켜기 명령은 전송되지 않아야 한다")
+def power_on_not_sent(world):
+    assert kw.then_power_on_not_sent(world)
+
+
+@then(parsers.parse('표시된 hvac_mode는 "{expected}" 이어야 한다'))
+def result_hvac_mode_is(world, expected):
+    assert kw.then_result_hvac_mode_is(world, expected)

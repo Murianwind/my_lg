@@ -288,7 +288,23 @@ class SmartThinqHybridClimateEntity(
         return self._last_swing_mode
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set the hvac mode via the PAT API."""
+        """Set the hvac mode via the PAT API.
+
+        When turning on from OFF, power and job mode are sent together
+        in a single `do_multi_attribute_command` call rather than two
+        sequential `await`s (set_air_con_operation_mode then
+        set_current_job_mode). Sending them sequentially left a real,
+        observed gap: MQTT can push the confirmation for the first call
+        (operation -> POWER_ON) before the second call's confirmation
+        (job mode -> e.g. COOL) arrives. In that window,
+        `hvac_mode` reads operation as "on" but job_mode is still
+        whatever it was cached as *before* the device was turned off
+        (e.g. "FAN", left over from an auto-dry cycle) - which computes
+        as HVACMode.FAN_ONLY, producing a real, logged
+        off -> fan_only -> cool blip in climate.eeokeon's own state
+        history. Sending both properties in one PAT request means both
+        land in the same response/push, closing that window entirely.
+        """
         if hvac_mode == HVACMode.OFF:
 
             async def _send_command() -> None:
@@ -304,8 +320,14 @@ class SmartThinqHybridClimateEntity(
 
             async def _send_command() -> None:
                 if self.coordinator.get_status(Property.AIR_CON_OPERATION_MODE) == "POWER_OFF":
-                    await self.device.set_air_con_operation_mode("POWER_ON")
-                await self.device.set_current_job_mode(pat_mode)
+                    await self.device.do_multi_attribute_command(
+                        {
+                            Property.AIR_CON_OPERATION_MODE: "POWER_ON",
+                            Property.CURRENT_JOB_MODE: pat_mode,
+                        }
+                    )
+                else:
+                    await self.device.set_current_job_mode(pat_mode)
 
         await self.async_send_pat_command(_send_command, error_message="에어컨 모드")
 

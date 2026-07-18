@@ -36,8 +36,8 @@ import my_lg.humidifier as humidifier_mod
 import my_lg.mqtt as mqtt_mod
 import my_lg.sensor as sensor_mod
 import my_lg.switch as switch_mod
-import my_lg.coordinator_pat as coordinator_pat_mod
 from my_lg import SmartThinqHybridRuntimeData
+import my_lg.coordinator_pat as coordinator_pat_mod
 from my_lg.coordinator_pat import PatDeviceCoordinator
 from my_lg.wideq.core_exceptions import APIError as WideqAPIError
 from my_lg.wideq.core_exceptions import InvalidCredentialError as WideqInvalidCredentialError
@@ -370,6 +370,7 @@ def when_setting_hvac_mode_with_pat_not_connected(world: World) -> None:
     from homeassistant.components.climate import HVACMode
     from thinqconnect import ThinQAPIErrorCodes, ThinQAPIException
 
+    world.entity.async_write_ha_state = MagicMock()
     world.entity.device.set_air_con_operation_mode = AsyncMock(
         side_effect=ThinQAPIException(ThinQAPIErrorCodes.NOT_CONNECTED_DEVICE, "offline", {})
     )
@@ -1505,6 +1506,121 @@ def then_course_sensor_is_not_none(world: World) -> bool:
 def then_washer_wideq_device_registered(world: World) -> bool:
     return world.extra["pat_device_id"] in world.runtime_data.washer_wideq_devices
 
+
+# --------------------------------------------------------------------
+# climate.py의 async_set_hvac_mode - 꺼진 상태에서 켤 때 전원 켜기와
+# 모드 전환을 순차적으로(안정화 대기 포함) 보내는지 + hvac_mode의
+# 짧은 낙관적 표시 창 관련 keyword
+#
+# 실제 로그에서 두 가지가 각각 확인됐다:
+# 1) 전원+모드를 한 요청에 같이 보내도 PAT 서버가
+#    COMMAND_NOT_SUPPORTED_IN_POWER_OFF로 거부하는 경우가 있어서,
+#    순차 전송(안정화 대기 포함)으로 되돌렸다.
+# 2) 순차 전송으로 되돌리면 원래 문제(operation_mode/job_mode가 서로
+#    다른 시점에 갱신되면서 hvac_mode가 잠깐 엉뚱하게 조합되는 것)가
+#    다시 생기므로, 명령을 보낸 뒤 잠깐은 요청한 값을 그대로 보여주는
+#    낙관적 표시 창으로 이걸 막는다.
+# --------------------------------------------------------------------
+
+
+def given_ac_coordinator_powered_off_with_stale_fan_mode(world: World) -> None:
+    """전원이 꺼져 있고, 꺼지기 전 마지막 job_mode가 FAN(송풍)으로 남아있는
+    에어컨 코디네이터를 만든다 - 실제 사건과 동일한 조건이다."""
+    device = given_pat_ac_device(
+        status={
+            "airConJobMode": {"currentJobMode": "FAN"},
+            "operation": {"airConOperationMode": "POWER_OFF"},
+        }
+    )
+    device.set_current_job_mode = AsyncMock()
+    device.set_air_con_operation_mode = AsyncMock()
+    given_pat_coordinator(world, device)
+    given_runtime_data(world)
+
+
+def when_setting_hvac_mode_to_cool(world: World) -> None:
+    """꺼진 상태의 에어컨 엔티티에 async_set_hvac_mode(COOL)을 호출한다.
+
+    안정화 대기(_POWER_ON_SETTLE_SECONDS)를 짧게 줄여서 테스트가
+    느려지지 않게 한다.
+    """
+    from unittest.mock import patch
+
+    from homeassistant.components.climate import HVACMode
+
+    entity = climate_mod.SmartThinqHybridClimateEntity(world.coordinator, None, world.runtime_data)
+    entity.hass = world.hass
+    entity.async_write_ha_state = MagicMock()
+    world.entity = entity
+    with patch.object(climate_mod, "_POWER_ON_SETTLE_SECONDS", 0.01):
+        asyncio.run(entity.async_set_hvac_mode(HVACMode.COOL))
+
+
+def then_power_on_sent_before_job_mode(world: World) -> bool:
+    """전원 켜기와 모드 전환이 (원자적 단일 요청이 아니라) 각각
+    순차적으로 호출됐는지 확인한다."""
+    device = world.coordinator.device
+    return (
+        device.set_air_con_operation_mode.called
+        and device.set_air_con_operation_mode.call_args.args == ("POWER_ON",)
+        and device.set_current_job_mode.called
+        and device.set_current_job_mode.call_args.args == ("COOL",)
+    )
+
+
+def when_setting_hvac_mode_while_already_on(world: World) -> None:
+    """이미 켜져 있는(POWER_ON) 에어컨의 hvac_mode를 다른 모드로 바꾼다.
+
+    이 경로는 전원 켜기 자체가 필요 없으니 안정화 대기 없이 모드만
+    바로 전송돼야 한다.
+    """
+    from homeassistant.components.climate import HVACMode
+
+    world.entity.async_write_ha_state = MagicMock()
+    asyncio.run(world.entity.async_set_hvac_mode(HVACMode.HEAT))
+
+
+def then_power_on_not_sent(world: World) -> bool:
+    return not world.coordinator.device.set_air_con_operation_mode.called
+
+
+def when_hvac_mode_read_during_pending_window(world: World) -> None:
+    """async_set_hvac_mode 호출 직후(아직 실제 기기 필드는 안 바뀐 채로)
+    hvac_mode 프로퍼티를 읽는다 - 낙관적 표시가 요청한 값을 그대로
+    보여주는지 확인하기 위함이다."""
+    world.result = world.entity.hvac_mode
+
+
+def then_result_hvac_mode_is(world: World, expected: str) -> bool:
+    from homeassistant.components.climate import HVACMode
+
+    return world.result == HVACMode(expected)
+
+
+def when_hvac_mode_set_but_command_ultimately_fails(world: World) -> None:
+    """hvac_mode 변경이 최종적으로 실패하는 상황을 만들고(예외는 삼켜서
+    world.exception에 담고), 그 직후 hvac_mode를 다시 읽어서 world.result
+    에 담는다 - 실패 시 낙관적 표시가 즉시 해제되는지 확인하기 위함."""
+    from homeassistant.components.climate import HVACMode
+    from thinqconnect import ThinQAPIException
+
+    if world.entity is None:
+        entity = climate_mod.SmartThinqHybridClimateEntity(
+            world.coordinator, None, world.runtime_data
+        )
+        entity.hass = world.hass
+        world.entity = entity
+    world.entity.async_write_ha_state = MagicMock()
+    world.entity.device.set_current_job_mode = AsyncMock(
+        side_effect=ThinQAPIException("9999", "치명적 오류", {})
+    )
+    try:
+        asyncio.run(world.entity.async_set_hvac_mode(HVACMode.HEAT))
+    except Exception as exc:  # pylint: disable=broad-except
+        world.exception = exc
+    world.result = world.entity.hvac_mode
+
+
 # --------------------------------------------------------------------
 # climate.py의 RestoreEntity(async_added_to_hass) 관련 keyword
 #
@@ -1680,67 +1796,6 @@ def when_rest_fallback_raises(world: World) -> None:
     except Exception as exc:  # pylint: disable=broad-except
         world.exception = exc
 
-# --------------------------------------------------------------------
-# async_set_fan_mode / async_set_swing_mode의 "정상 성공" 경로 관련
-# keyword
-#
-# 지금까지 이 두 메서드는 "재인증 필요라서 스킵되는 경우"만 테스트
-# 되어 있었다. 정작 매일 실행되는 정상 성공 경로(풍속/스윙을 바꾸면
-# 화면에 그대로 반영되는지)는 한 번도 검증된 적이 없었다.
-# --------------------------------------------------------------------
-
-
-def when_setting_fan_mode(world: World, fan_mode: str) -> None:
-    """재인증 필요 상태가 아닌 정상 상태에서 async_set_fan_mode를 호출한다.
-
-    async_set_fan_mode는 성공 시 async_write_ha_state()를 호출하는데,
-    이건 보통 EntityPlatform이 엔티티를 등록할 때 부여하는 실제
-    entity_id가 필요하다. 여기서 검증하려는 건 "성공하면 _last_fan_mode
-    가 갱신되는지"이지 HA의 상태 기록 자체가 아니므로, 다른 테스트들과
-    동일하게 stub 처리한다.
-    """
-    world.entity.async_write_ha_state = MagicMock()
-    asyncio.run(world.entity.async_set_fan_mode(fan_mode))
-
-
-def when_setting_swing_mode(world: World, swing_mode: str) -> None:
-    """재인증 필요 상태가 아닌 정상 상태에서 async_set_swing_mode를 호출한다."""
-    world.entity.async_write_ha_state = MagicMock()
-    asyncio.run(world.entity.async_set_swing_mode(swing_mode))
-
-
-def then_entity_fan_mode_equals(world: World, expected: str) -> bool:
-    return world.entity.fan_mode == expected
-
-
-def then_entity_swing_mode_equals(world: World, expected: str) -> bool:
-    return world.entity.swing_mode == expected
-
-
-def then_fan_swing_device_horizontal_step_called_with(world: World, expected: str) -> bool:
-    mock_call = world.extra["fan_swing_device"].set_horizontal_step_mode
-    return mock_call.called and mock_call.call_args.args == (expected,)
-
-
-def when_wideq_session_expires_then_retry_raises_invalid_credential(world: World) -> None:
-    """wideq 세션이 만료됐다가(NotLoggedInError), refresh_auth 후 재시도한
-    호출이 이번엔 InvalidCredentialError로 실패하는 상황을 만든다.
-
-    _async_send_wideq_command의 "세션 갱신 후 재시도" 분기 안에 있는
-    InvalidCredentialError 처리(재인증 필요로 표시하고 False 반환)를
-    별도로 검증한다 - 세션 만료와 재인증 필요가 동시에 겹치는,
-    드물지만 실제로 있을 수 있는 조합이다.
-    """
-    call_count = {"n": 0}
-
-    async def _flaky():
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            raise WideqNotLoggedInError("세션 만료")
-        raise WideqInvalidCredentialError("0110")
-
-    world.entity._wideq_client.refresh_auth = AsyncMock()
-    _run_wideq_command_with_short_retry_delay(world, _flaky)
 
 # --------------------------------------------------------------------
 # coordinator_pat.py의 async_send_pat_command 일시적 에러 재시도 관련
@@ -1830,6 +1885,7 @@ def when_pat_command_transient_then_not_connected(world: World) -> None:
 def then_pat_call_count_is(world: World, expected: int) -> bool:
     return world.extra["pat_call_count"]["n"] == expected
 
+
 # --------------------------------------------------------------------
 # async_send_pat_command의 verify(실제 상태 확인 후 판단) 경로 관련
 # keyword
@@ -1905,6 +1961,7 @@ def when_pat_command_needs_actual_resend_to_succeed(world: World) -> None:
     world.extra["pat_call_count"] = call_count
     _run_pat_command_with_verify(world, _flaky, verify=lambda: call_count["n"] >= 2)
 
+
 def when_pat_command_fails_with_command_not_supported_in_power_off_then_retry_succeeds(
     world: World,
 ) -> None:
@@ -1922,63 +1979,65 @@ def when_pat_command_fails_with_command_not_supported_in_power_off_then_retry_su
 
     _run_pat_command_with_short_retry_delay(world, _flaky)
 
+
 # --------------------------------------------------------------------
-# climate.py의 async_set_hvac_mode - 꺼진 상태에서 켤 때 전원+모드를
-# 원자적으로 함께 보내는지 관련 keyword
+# async_set_fan_mode / async_set_swing_mode의 "정상 성공" 경로 관련
+# keyword
 #
-# 실제 로그(로그북)에서 "에어컨 꺼짐 -> 냉방 켜기" 순간에 climate.eeokeon
-# 상태가 순간적으로 fan_only를 거쳐갔다가 cool로 정착하는 게 확인됐다.
-# operation_mode(POWER_ON)와 job_mode(COOL)를 순차적으로 두 번 보내면,
-# 첫 번째 확인만 도착한 순간엔 job_mode가 꺼지기 전 마지막 값(예: FAN)
-# 그대로라 hvac_mode가 fan_only로 잘못 계산되는 창이 생긴다.
-# do_multi_attribute_command로 한 번에 보내면 이 창이 사라진다.
+# 지금까지 이 두 메서드는 "재인증 필요라서 스킵되는 경우"만 테스트
+# 되어 있었다. 정작 매일 실행되는 정상 성공 경로(풍속/스윙을 바꾸면
+# 화면에 그대로 반영되는지)는 한 번도 검증된 적이 없었다.
 # --------------------------------------------------------------------
 
 
-def given_ac_coordinator_powered_off_with_stale_fan_mode(world: World) -> None:
-    """전원이 꺼져 있고, 꺼지기 전 마지막 job_mode가 FAN(송풍)으로 남아있는
-    에어컨 코디네이터를 만든다 - 실제 사건과 동일한 조건이다."""
-    device = given_pat_ac_device(
-        status={
-            "airConJobMode": {"currentJobMode": "FAN"},
-            "operation": {"airConOperationMode": "POWER_OFF"},
-        }
-    )
-    device.do_multi_attribute_command = AsyncMock()
-    device.set_current_job_mode = AsyncMock()
-    device.set_air_con_operation_mode = AsyncMock()
-    given_pat_coordinator(world, device)
-    given_runtime_data(world)
+def when_setting_fan_mode(world: World, fan_mode: str) -> None:
+    """재인증 필요 상태가 아닌 정상 상태에서 async_set_fan_mode를 호출한다.
+
+    async_set_fan_mode는 성공 시 async_write_ha_state()를 호출하는데,
+    이건 보통 EntityPlatform이 엔티티를 등록할 때 부여하는 실제
+    entity_id가 필요하다. 여기서 검증하려는 건 "성공하면 _last_fan_mode
+    가 갱신되는지"이지 HA의 상태 기록 자체가 아니므로, 다른 테스트들과
+    동일하게 stub 처리한다.
+    """
+    world.entity.async_write_ha_state = MagicMock()
+    asyncio.run(world.entity.async_set_fan_mode(fan_mode))
 
 
-def when_setting_hvac_mode_to_cool(world: World) -> None:
-    """꺼진 상태의 에어컨 엔티티에 async_set_hvac_mode(COOL)을 호출한다."""
-    from homeassistant.components.climate import HVACMode
-
-    entity = climate_mod.SmartThinqHybridClimateEntity(world.coordinator, None, world.runtime_data)
-    entity.hass = world.hass
-    world.entity = entity
-    asyncio.run(entity.async_set_hvac_mode(HVACMode.COOL))
+def when_setting_swing_mode(world: World, swing_mode: str) -> None:
+    """재인증 필요 상태가 아닌 정상 상태에서 async_set_swing_mode를 호출한다."""
+    world.entity.async_write_ha_state = MagicMock()
+    asyncio.run(world.entity.async_set_swing_mode(swing_mode))
 
 
-def then_power_and_job_mode_sent_atomically(world: World) -> bool:
-    """전원 켜기와 모드 전환이 순차 호출이 아니라 do_multi_attribute_command
-    한 번으로 같이 나갔는지 확인한다."""
-    device = world.coordinator.device
-    multi_call = device.do_multi_attribute_command
-    if not multi_call.called:
-        return False
-    sent_attrs = multi_call.call_args.args[0]
-    from thinqconnect.devices.const import Property
-
-    return (
-        sent_attrs.get(Property.AIR_CON_OPERATION_MODE) == "POWER_ON"
-        and sent_attrs.get(Property.CURRENT_JOB_MODE) == "COOL"
-    )
+def then_entity_fan_mode_equals(world: World, expected: str) -> bool:
+    return world.entity.fan_mode == expected
 
 
-def then_separate_power_and_mode_calls_not_used(world: World) -> bool:
-    """예전처럼 set_air_con_operation_mode/set_current_job_mode를 따로
-    호출하지 않았는지 확인한다 (원자적 경로만 써야 한다)."""
-    device = world.coordinator.device
-    return not device.set_air_con_operation_mode.called and not device.set_current_job_mode.called
+def then_entity_swing_mode_equals(world: World, expected: str) -> bool:
+    return world.entity.swing_mode == expected
+
+
+def then_fan_swing_device_horizontal_step_called_with(world: World, expected: str) -> bool:
+    mock_call = world.extra["fan_swing_device"].set_horizontal_step_mode
+    return mock_call.called and mock_call.call_args.args == (expected,)
+
+
+def when_wideq_session_expires_then_retry_raises_invalid_credential(world: World) -> None:
+    """wideq 세션이 만료됐다가(NotLoggedInError), refresh_auth 후 재시도한
+    호출이 이번엔 InvalidCredentialError로 실패하는 상황을 만든다.
+
+    _async_send_wideq_command의 "세션 갱신 후 재시도" 분기 안에 있는
+    InvalidCredentialError 처리(재인증 필요로 표시하고 False 반환)를
+    별도로 검증한다 - 세션 만료와 재인증 필요가 동시에 겹치는,
+    드물지만 실제로 있을 수 있는 조합이다.
+    """
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise WideqNotLoggedInError("세션 만료")
+        raise WideqInvalidCredentialError("0110")
+
+    world.entity._wideq_client.refresh_auth = AsyncMock()
+    _run_wideq_command_with_short_retry_delay(world, _flaky)

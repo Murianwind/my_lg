@@ -56,10 +56,30 @@ _PAT_TRANSIENT_RESULT_CODES = {
     ThinQAPIErrorCodes.DEVICE_RESPONSE_DELAY,
     ThinQAPIErrorCodes.RETRY_REQUEST,
     ThinQAPIErrorCodes.SYNCING,
+    # Our own operation_mode cache lagging behind the device's real
+    # state (e.g. a sibling automation just turned it off, but our
+    # coordinator hasn't caught up yet) - retrying re-checks
+    # coordinator.get_status() fresh each time, so once the cache
+    # catches up the retry naturally picks the correct code path
+    # (e.g. climate.py's async_set_hvac_mode switches from a
+    # mode-only command to the combined power+mode one). Seen in real
+    # logs when "에어컨 보일러 연동" mirrored a hvac_mode change onto an
+    # AC that had just been powered off elsewhere.
+    ThinQAPIErrorCodes.COMMAND_NOT_SUPPORTED_IN_POWER_OFF,
 }
 
 # How long to wait before a single retry after a transient PAT failure.
-_PAT_RETRY_DELAY_SECONDS = 0.6
+# Set from real observed timing, not a guess: switch.py's energy-saving
+# toggle was seen in logs to report FAIL_DEVICE_CONTROL and then still
+# get applied by the device ~2.5s later regardless - so a retry needs
+# real headroom past that, not just a fraction of a second, to actually
+# land after the device (or our local state cache) has caught up. This
+# is deliberately much longer than climate.py's _WIDEQ_RETRY_DELAY_SECONDS
+# (0.6s): that value comes from separate real-log evidence specific to
+# wideq's own transient codes ("0103" observed clearing in under 0.5s),
+# and PAT/wideq are different backends with different latency behavior
+# - there's no reason to expect them to share one retry delay.
+_PAT_RETRY_DELAY_SECONDS = 3.0
 
 _DEVICE_CLASS_MAP = {
     PAT_DEVICE_TYPE_AC: AirConditionerDevice,

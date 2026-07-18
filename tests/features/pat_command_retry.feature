@@ -26,3 +26,8 @@ Feature: PAT 명령의 일시적 에러 재시도 (async_send_pat_command)
     When PAT 명령이 FAIL_DEVICE_CONTROL로 실패했다가 재시도에서는 기기 오프라인으로 실패한다
     Then 예외가 발생하지 않아야 한다
     And 코디네이터는 unavailable 이어야 한다
+
+  Scenario: COMMAND_NOT_SUPPORTED_IN_POWER_OFF로 실패했다가 재시도에서 성공하면 예외 없이 처리된다
+    Given 정상 상태(POWER_ON, COOL)의 에어컨 PAT 코디네이터가 있다
+    When PAT 명령이 COMMAND_NOT_SUPPORTED_IN_POWER_OFF로 실패했다가 재시도에서 성공한다
+    Then 예외가 발생하지 않아야 한다

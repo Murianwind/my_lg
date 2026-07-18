@@ -1904,3 +1904,64 @@ def when_pat_command_needs_actual_resend_to_succeed(world: World) -> None:
 
     world.extra["pat_call_count"] = call_count
     _run_pat_command_with_verify(world, _flaky, verify=lambda: call_count["n"] >= 2)
+
+# --------------------------------------------------------------------
+# climate.py의 async_set_hvac_mode - 꺼진 상태에서 켤 때 전원+모드를
+# 원자적으로 함께 보내는지 관련 keyword
+#
+# 실제 로그(로그북)에서 "에어컨 꺼짐 -> 냉방 켜기" 순간에 climate.eeokeon
+# 상태가 순간적으로 fan_only를 거쳐갔다가 cool로 정착하는 게 확인됐다.
+# operation_mode(POWER_ON)와 job_mode(COOL)를 순차적으로 두 번 보내면,
+# 첫 번째 확인만 도착한 순간엔 job_mode가 꺼지기 전 마지막 값(예: FAN)
+# 그대로라 hvac_mode가 fan_only로 잘못 계산되는 창이 생긴다.
+# do_multi_attribute_command로 한 번에 보내면 이 창이 사라진다.
+# --------------------------------------------------------------------
+
+
+def given_ac_coordinator_powered_off_with_stale_fan_mode(world: World) -> None:
+    """전원이 꺼져 있고, 꺼지기 전 마지막 job_mode가 FAN(송풍)으로 남아있는
+    에어컨 코디네이터를 만든다 - 실제 사건과 동일한 조건이다."""
+    device = given_pat_ac_device(
+        status={
+            "airConJobMode": {"currentJobMode": "FAN"},
+            "operation": {"airConOperationMode": "POWER_OFF"},
+        }
+    )
+    device.do_multi_attribute_command = AsyncMock()
+    device.set_current_job_mode = AsyncMock()
+    device.set_air_con_operation_mode = AsyncMock()
+    given_pat_coordinator(world, device)
+    given_runtime_data(world)
+
+
+def when_setting_hvac_mode_to_cool(world: World) -> None:
+    """꺼진 상태의 에어컨 엔티티에 async_set_hvac_mode(COOL)을 호출한다."""
+    from homeassistant.components.climate import HVACMode
+
+    entity = climate_mod.SmartThinqHybridClimateEntity(world.coordinator, None, world.runtime_data)
+    entity.hass = world.hass
+    world.entity = entity
+    asyncio.run(entity.async_set_hvac_mode(HVACMode.COOL))
+
+
+def then_power_and_job_mode_sent_atomically(world: World) -> bool:
+    """전원 켜기와 모드 전환이 순차 호출이 아니라 do_multi_attribute_command
+    한 번으로 같이 나갔는지 확인한다."""
+    device = world.coordinator.device
+    multi_call = device.do_multi_attribute_command
+    if not multi_call.called:
+        return False
+    sent_attrs = multi_call.call_args.args[0]
+    from thinqconnect.devices.const import Property
+
+    return (
+        sent_attrs.get(Property.AIR_CON_OPERATION_MODE) == "POWER_ON"
+        and sent_attrs.get(Property.CURRENT_JOB_MODE) == "COOL"
+    )
+
+
+def then_separate_power_and_mode_calls_not_used(world: World) -> bool:
+    """예전처럼 set_air_con_operation_mode/set_current_job_mode를 따로
+    호출하지 않았는지 확인한다 (원자적 경로만 써야 한다)."""
+    device = world.coordinator.device
+    return not device.set_air_con_operation_mode.called and not device.set_current_job_mode.called

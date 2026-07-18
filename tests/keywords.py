@@ -1905,6 +1905,23 @@ def when_pat_command_needs_actual_resend_to_succeed(world: World) -> None:
     world.extra["pat_call_count"] = call_count
     _run_pat_command_with_verify(world, _flaky, verify=lambda: call_count["n"] >= 2)
 
+def when_pat_command_fails_with_command_not_supported_in_power_off_then_retry_succeeds(
+    world: World,
+) -> None:
+    """PAT 명령이 COMMAND_NOT_SUPPORTED_IN_POWER_OFF(2304)로 실패했다가,
+    재시도에서 성공하는 상황을 만든다 - 로컬 캐시가 실제 기기 상태를
+    뒤늦게 따라잡아서 재시도 시점엔 올바른 명령 경로를 타는 경우를
+    흉내낸다."""
+    call_count = {"n": 0}
+
+    async def _flaky():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ThinQAPIException("2304", "전원 꺼짐 상태에서 지원 안 됨", {})
+        return None
+
+    _run_pat_command_with_short_retry_delay(world, _flaky)
+
 # --------------------------------------------------------------------
 # climate.py의 async_set_hvac_mode - 꺼진 상태에서 켤 때 전원+모드를
 # 원자적으로 함께 보내는지 관련 keyword
